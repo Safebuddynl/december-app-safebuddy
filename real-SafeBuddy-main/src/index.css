@@ -1,0 +1,228 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* SafeBuddy Design System - Professional Safety App
+   Main color: #733CB6 (purple) with fade to #A47BE0
+   All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 10%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 10%;
+
+    /* Primary: #733CB6 = hsl(273, 51%, 47%) */
+    --primary: 273 51% 47%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Primary Light: #A47BE0 = hsl(273, 62%, 68%) */
+    --primary-light: 273 62% 68%;
+
+    /* Secondary: lighter purple */
+    --secondary: 273 40% 60%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 240 5% 96%;
+    --muted-foreground: 240 4% 46%;
+
+    --accent: 273 51% 92%;
+    --accent-foreground: 273 51% 30%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 142 76% 36%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+
+    --border: 240 6% 90%;
+    --input: 240 6% 90%;
+    --ring: 273 51% 47%;
+
+    /* Brand colors */
+    --brand-purple: 273 51% 47%;
+    --brand-light: 273 62% 68%;
+    
+    --gradient-primary: linear-gradient(135deg, hsl(240 40% 50%), hsl(273 62% 68%));
+    --gradient-header: linear-gradient(135deg, hsl(240 40% 50%), hsl(273 62% 68%));
+    --gradient-interactive: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--primary-light)));
+    --shadow-card: 0 2px 12px -2px hsl(273 51% 47% / 0.15);
+    --shadow-elevated: 0 8px 30px -4px hsl(273 51% 47% / 0.25);
+    --shadow-glow: 0 0 30px hsl(273 51% 47% / 0.2);
+    --shadow-glow-light: 0 0 20px hsl(273 62% 68% / 0.4);
+
+    --radius: 0.75rem;
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 273 51% 47%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 273 51% 95%;
+    --sidebar-accent-foreground: 273 51% 30%;
+    --sidebar-border: 240 6% 90%;
+    --sidebar-ring: 273 51% 47%;
+  }
+
+  .dark {
+    --background: 240 10% 8%;
+    --foreground: 0 0% 98%;
+
+    --card: 240 10% 12%;
+    --card-foreground: 0 0% 98%;
+
+    --popover: 240 10% 10%;
+    --popover-foreground: 0 0% 98%;
+
+    --primary: 273 51% 55%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 273 40% 45%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 240 5% 20%;
+    --muted-foreground: 240 5% 65%;
+
+    --accent: 273 51% 25%;
+    --accent-foreground: 273 51% 90%;
+
+    --destructive: 0 63% 35%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 240 5% 20%;
+    --input: 240 5% 20%;
+    --ring: 273 51% 55%;
+
+    --sidebar-background: 240 10% 10%;
+    --sidebar-foreground: 0 0% 95%;
+    --sidebar-primary: 273 51% 55%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 273 51% 20%;
+    --sidebar-accent-foreground: 273 51% 90%;
+    --sidebar-border: 240 5% 20%;
+    --sidebar-ring: 273 51% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+}
+
+@layer utilities {
+  .hover-pop {
+    @apply transition-all duration-200 hover:scale-[1.02] hover:shadow-elevated;
+  }
+  
+  .glow {
+    box-shadow: var(--shadow-glow);
+  }
+
+  .glow-light {
+    box-shadow: var(--shadow-glow-light);
+  }
+
+  .gradient-primary {
+    background: var(--gradient-primary);
+  }
+
+  .gradient-header {
+    background: var(--gradient-header);
+  }
+
+  .gradient-interactive {
+    background: var(--gradient-interactive);
+  }
+
+  /* Animated card hover effect */
+  .card-interactive {
+    @apply transition-all duration-200 ease-in-out;
+  }
+  
+  .card-interactive:hover {
+    box-shadow: 0 0 20px hsl(273 62% 68% / 0.3);
+    transform: translateY(-2px);
+  }
+
+  /* Ripple effect base */
+  .ripple-effect {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .ripple-effect::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at var(--ripple-x, 50%) var(--ripple-y, 50%), hsl(273 62% 68% / 0.4) 0%, transparent 60%);
+    opacity: 0;
+    transform: scale(0);
+    transition: opacity 200ms ease-out, transform 300ms ease-out;
+  }
+
+  .ripple-effect:active::after {
+    opacity: 1;
+    transform: scale(2);
+  }
+
+  /* Animated tab underline */
+  .tab-underline {
+    position: relative;
+  }
+
+  .tab-underline::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    width: 0;
+    height: 2px;
+    background: linear-gradient(90deg, hsl(273 51% 47%), hsl(273 62% 68%));
+    transition: all 200ms ease-in-out;
+    transform: translateX(-50%);
+  }
+
+  .tab-underline[data-state="active"]::after {
+    width: 80%;
+  }
+
+  /* Route path animation */
+  .route-path-animated {
+    stroke: url(#routeGradient);
+    stroke-dasharray: 10 5;
+    animation: flowPath 1.5s linear infinite;
+  }
+
+  @keyframes flowPath {
+    0% { stroke-dashoffset: 0; }
+    100% { stroke-dashoffset: -30; }
+  }
+
+  /* Fade in/out for heatmap overlay */
+  .heatmap-overlay {
+    transition: opacity 250ms ease-in-out;
+  }
+
+  .heatmap-overlay-hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .heatmap-overlay-visible {
+    opacity: 1;
+  }
+}

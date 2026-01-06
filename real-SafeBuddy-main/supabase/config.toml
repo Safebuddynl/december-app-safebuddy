@@ -1,0 +1,10 @@
+project_id = "udvrwujgkvoekgdnfztl"
+
+[functions.safe-route]
+verify_jwt = false
+
+[functions.verify-face-match]
+verify_jwt = false
+
+[functions.geocode-location]
+verify_jwt = false
