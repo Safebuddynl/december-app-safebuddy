@@ -28,6 +28,7 @@ interface AddressSuggestion {
 
 const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportLocationDialogProps) => {
   const [locationAddress, setLocationAddress] = useState("");
+  const [coordinates, setCoordinates] = useState<{ lat: number; lon: number } | null>(null);
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [reportType, setReportType] = useState("");
@@ -86,9 +87,11 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
     return parts.length > 0 ? parts.join(", ") : suggestion.display_name;
   };
 
-  const selectSuggestion = (suggestion: AddressSuggestion) => {
+  const selectSuggestion = (suggestion: any) => {
     const formattedAddress = formatStreetAddress(suggestion);
     setLocationAddress(formattedAddress);
+    // Sla coördinaten op voor PostGIS
+    setCoordinates({ lat: parseFloat(suggestion.lat), lon: parseFloat(suggestion.lon) });
     setShowSuggestions(false);
   };
 
@@ -98,6 +101,12 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
       navigator.geolocation.getCurrentPosition(
         async (position) => {
           try {
+            // Sla coördinaten direct op
+            setCoordinates({ 
+              lat: position.coords.latitude, 
+              lon: position.coords.longitude 
+            });
+            
             const response = await fetch(
               `https://nominatim.openstreetmap.org/reverse?lat=${position.coords.latitude}&lon=${position.coords.longitude}&format=json&addressdetails=1`
             );
@@ -137,6 +146,11 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
       return;
     }
 
+    if (!coordinates) {
+      toast.error("Please select a location from the suggestions or use current location");
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
@@ -147,9 +161,13 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
         return;
       }
 
+      // PostGIS verwacht POINT(longitude latitude) format
+      const locationString = `POINT(${coordinates.lon} ${coordinates.lat})`;
+
       const { error } = await supabase.from("safety_reports").insert({
         user_id: user.id,
         location_address: locationAddress,
+        location: locationString,
         report_type: reportType,
         severity,
         time_of_day: timeOfDay,
@@ -162,6 +180,7 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
       onReportSubmitted?.();
       
       setLocationAddress("");
+      setCoordinates(null);
       setReportType("");
       setSeverity("medium");
       setTimeOfDay("");

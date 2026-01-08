@@ -74,6 +74,22 @@ const TIME_FILTERS = [
   { value: "all", label: "All" },
 ];
 
+// Helper function to convert WKB hex string to double precision float
+function hexToDouble(hex: string): number {
+  // Convert hex string to bytes (little-endian)
+  const bytes = [];
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes.push(parseInt(hex.substr(i, 2), 16));
+  }
+  
+  // Convert bytes to double (IEEE 754 double precision)
+  const buffer = new ArrayBuffer(8);
+  const view = new DataView(buffer);
+  bytes.forEach((b, i) => view.setUint8(i, b));
+  
+  return view.getFloat64(0, true); // true = little-endian
+}
+
 const Route = () => {
   const [start, setStart] = useState("");
   const [destination, setDestination] = useState("");
@@ -163,7 +179,88 @@ const Route = () => {
 
   const geocodeReports = async (reportData: SafetyReport[]) => {
     const points: HeatPoint[] = [];
-    for (const report of reportData.slice(0, 20)) { // Limit to 20 for performance
+    
+    try {
+      // Direct query with PostgREST computed columns for lat/lng
+      // We'll query the database and let PostgREST handle the geometry conversion
+      const { data: rawData, error } = await supabase
+        .from('map_points')
+        .select('*');
+      // Geen limit - we willen alle ~14,903 punten zien
+      
+      if (error) {
+        console.error('❌ Error fetching map points:', error);
+        return;
+      }
+      
+      if (!rawData || rawData.length === 0) {
+        console.log('⚠️ No map points found in database');
+        return;
+      }
+      
+      console.log(`📍 Loaded ${rawData.length} raw map points`);
+      console.log('Sample raw point:', rawData[0]);
+      
+      // Parse WKB hex strings to extract coordinates
+      // WKB format for POINT: starts with 0101000020E6100000 (header) + 16 bytes for X + 16 bytes for Y
+      rawData.forEach((mp: any) => {
+        try {
+          if (mp.location && typeof mp.location === 'string') {
+            // WKB hex string - we need to decode it
+            // Format: 0101000020 E6100000 [8 bytes X as hex] [8 bytes Y as hex]
+            const wkb = mp.location;
+            
+            // Skip the SRID and point type prefix (first 18 chars = 9 bytes)
+            // 01 = little endian
+            // 01000020 = point type with SRID
+            // E6100000 = SRID 4326
+            // Next 16 chars = longitude (8 bytes as double)
+            // Next 16 chars = latitude (8 bytes as double)
+            
+            if (wkb.length >= 50) {  // Min length for a WKB POINT
+              const coordsHex = wkb.substring(18); // Skip header
+              
+              // Extract X (longitude) - first 16 hex chars = 8 bytes
+              const xHex = coordsHex.substring(0, 16);
+              // Extract Y (latitude) - next 16 hex chars = 8 bytes  
+              const yHex = coordsHex.substring(16, 32);
+              
+              // Convert hex to double (IEEE 754)
+              const lng = hexToDouble(xHex);
+              const lat = hexToDouble(yHex);
+              
+              if (!isNaN(lat) && !isNaN(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+                points.push({
+                  lat,
+                  lng,
+                  report: {
+                    id: mp.id.toString(),
+                    location_address: mp.title || 'Onbekende locatie',
+                    severity: mp.severity === 'critical' ? 'high' : mp.severity,
+                    report_type: mp.report_type || 'other',
+                    created_at: mp.created_at,
+                    description: mp.description,
+                    upvotes: mp.upvotes || 0,
+                  },
+                });
+              } else {
+                console.warn(`Invalid coordinates: lat=${lat}, lng=${lng}`);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('Error parsing WKB:', e, mp.id);
+        }
+      });
+      
+      console.log(`✅ Successfully parsed ${points.length} points for map`);
+      
+    } catch (err) {
+      console.error('❌ Unexpected error:', err);
+    }
+    
+    // Voeg ook safety_reports toe (met geocoding)
+    for (const report of reportData.slice(0, 20)) {
       try {
         const response = await fetch(
           `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(report.location_address + ", Netherlands")}&format=json&limit=1`
@@ -181,6 +278,8 @@ const Route = () => {
         console.error("Geocoding error:", error);
       }
     }
+    
+    console.log(`🗺️ Loaded ${points.length} points on map`);
     setHeatPoints(points);
   };
 
@@ -300,6 +399,64 @@ const Route = () => {
     tileLayerRef.current = tile;
     mapRef.current = map;
 
+    // Update heatmap radius when zoom changes - zonder map te verplaatsen
+    map.on('zoomend', () => {
+      // Gewoon heatmap opnieuw renderen zonder state update
+      if (heatLayerRef.current && heatPoints.length > 0) {
+        // Verwijder oude heatmap
+        map.removeLayer(heatLayerRef.current);
+        heatLayerRef.current = null;
+        
+        // Verwijder oude markers
+        map.eachLayer((layer) => {
+          if (layer instanceof L.CircleMarker) map.removeLayer(layer);
+        });
+        
+        // Voeg nieuwe heatmap toe met aangepaste grootte
+        const currentZoom = map.getZoom();
+        const radius = Math.max(8, Math.min(45, currentZoom * 2.8));
+        const blur = Math.max(8, Math.min(35, currentZoom * 2.2));
+        const markerRadius = Math.max(3, Math.min(8, currentZoom * 0.5));
+        const markerWeight = currentZoom > 12 ? 2 : 1;
+        
+        const heatData: [number, number, number][] = heatPoints.map((point) => {
+          const intensity = point.report.severity === "high" ? 1.0 : point.report.severity === "medium" ? 0.6 : 0.3;
+          return [point.lat, point.lng, intensity];
+        });
+        
+        if (heatData.length > 0 && (L as any).heatLayer) {
+          heatLayerRef.current = (L as any).heatLayer(heatData, {
+            radius: radius,
+            blur: blur,
+            maxZoom: 17,
+            max: 1.0,
+            gradient: {
+              0.0: '#22c55e',
+              0.3: '#fbbf24',
+              0.5: '#f59e0b',
+              0.7: '#f97316',
+              0.9: '#ef4444',
+              1.0: '#dc2626'
+            }
+          }).addTo(map);
+        }
+        
+        // Voeg markers toe
+        heatPoints.forEach((point) => {
+          const color = point.report.severity === "high" ? "#ef4444" : point.report.severity === "medium" ? "#f59e0b" : "#22c55e";
+          const circle = L.circleMarker([point.lat, point.lng], {
+            radius: markerRadius,
+            fillColor: color,
+            color: "#ffffff",
+            weight: markerWeight,
+            opacity: 0.8,
+            fillOpacity: 0.6,
+          }).addTo(map);
+          circle.on("click", () => setSelectedPoint(point));
+        });
+      }
+    });
+
     return () => {
       map.remove();
       mapRef.current = null;
@@ -367,11 +524,16 @@ const Route = () => {
       return [point.lat, point.lng, intensity];
     });
 
-    // Add heatmap layer
+    // Add heatmap layer with zoom-based radius
     if (heatData.length > 0 && (L as any).heatLayer) {
+      const currentZoom = map.getZoom();
+      // Dynamische radius: kleiner bij uitzoomen (zoom < 12), groter bij inzoomen
+      const radius = Math.max(8, Math.min(45, currentZoom * 2.8));
+      const blur = Math.max(8, Math.min(35, currentZoom * 2.2));
+      
       heatLayerRef.current = (L as any).heatLayer(heatData, {
-        radius: 40,
-        blur: 35,
+        radius: radius,
+        blur: blur,
         maxZoom: 17,
         max: 1.0,
         gradient: {
@@ -385,14 +547,18 @@ const Route = () => {
       }).addTo(map);
     }
 
-    // Add clickable markers on top for interactivity
+    // Add clickable markers on top for interactivity with zoom-based size
+    const currentZoom = map.getZoom();
+    const markerRadius = Math.max(3, Math.min(8, currentZoom * 0.5));
+    const markerWeight = currentZoom > 12 ? 2 : 1;
+    
     heatPoints.forEach((point) => {
       const color = point.report.severity === "high" ? "#ef4444" : point.report.severity === "medium" ? "#f59e0b" : "#22c55e";
       const circle = L.circleMarker([point.lat, point.lng], {
-        radius: 6,
+        radius: markerRadius,
         fillColor: color,
         color: "#ffffff",
-        weight: 2,
+        weight: markerWeight,
         opacity: 0.8,
         fillOpacity: 0.6,
       }).addTo(map);
@@ -483,11 +649,12 @@ const Route = () => {
     const modeLabel = travelMode === "foot" ? "lopen" : travelMode === "bike" ? "fietsen" : "rijden";
     toast.loading(`Berekenen van veiligste route voor ${modeLabel}...`);
 
-    // Helper function to calculate route safety
+    // Helper function to calculate route safety with age and severity weighting
     const calculateRouteSafety = (coords: [number, number][]) => {
       let score = 100;
       const dangerousAreas: string[] = [];
       const checkedReports = new Set<string>();
+      const now = new Date();
 
       for (const [lat, lng] of coords) {
         for (const point of heatPoints) {
@@ -495,18 +662,49 @@ const Route = () => {
           
           const distance = calculateDistance(lat, lng, point.lat, point.lng);
           
-          if (distance < 0.5) {
+          // Alleen kijken naar punten binnen 200m van de route
+          if (distance < 0.2) {
             checkedReports.add(point.report.id);
             
-            if (point.report.severity === "high") {
-              score -= 30;
-              dangerousAreas.push(`${point.report.report_type} (Hoog risico) bij ${point.report.location_address}`);
-            } else if (point.report.severity === "medium") {
-              score -= 15;
-              dangerousAreas.push(`${point.report.report_type} (Gemiddeld risico) bij ${point.report.location_address}`);
-            } else {
-              score -= 5;
+            // Bereken leeftijd van melding in dagen
+            const reportDate = new Date(point.report.created_at);
+            const ageInDays = (now.getTime() - reportDate.getTime()) / (1000 * 60 * 60 * 24);
+            
+            // Age factor: oudere meldingen wegen minder zwaar
+            // < 7 dagen = 100%, 30 dagen = 80%, 90 dagen = 60%, 180 dagen = 40%, > 365 dagen = 20%
+            let ageFactor = 1.0;
+            if (ageInDays > 365) {
+              ageFactor = 0.2; // Jaar oud of ouder: 20% van impact
+            } else if (ageInDays > 180) {
+              ageFactor = 0.4; // Half jaar: 40%
+            } else if (ageInDays > 90) {
+              ageFactor = 0.6; // 3 maanden: 60%
+            } else if (ageInDays > 30) {
+              ageFactor = 0.8; // Maand: 80%
+            } else if (ageInDays > 7) {
+              ageFactor = 0.9; // Week: 90%
             }
+            
+            // Distance factor: dichterbij = gevaarlijker (lineair van 200m tot 50m)
+            const distanceFactor = Math.max(0.5, 1.0 - (distance / 0.2));
+            
+            // Combineer severity, age en distance
+            let penalty = 0;
+            if (point.report.severity === "high") {
+              penalty = 40 * ageFactor * distanceFactor;
+              if (ageFactor > 0.5) {
+                dangerousAreas.push(`${point.report.report_type} (Hoog risico) bij ${point.report.location_address}`);
+              }
+            } else if (point.report.severity === "medium") {
+              penalty = 20 * ageFactor * distanceFactor;
+              if (ageFactor > 0.5) {
+                dangerousAreas.push(`${point.report.report_type} (Gemiddeld risico) bij ${point.report.location_address}`);
+              }
+            } else {
+              penalty = 8 * ageFactor * distanceFactor;
+            }
+            
+            score -= penalty;
           }
         }
       }
@@ -571,18 +769,41 @@ const Route = () => {
         };
       });
 
-      // Sort by safety score first (higher is better), then by duration if scores are equal
-      routesWithSafety.sort((a: any, b: any) => {
-        const safetyDiff = b.safety.score - a.safety.score;
-        // If safety scores are very close (within 10 points), prefer faster route
-        if (Math.abs(safetyDiff) < 10) {
-          return a.duration - b.duration;
-        }
-        return safetyDiff;
+      // Vind de snelste route
+      const fastestRoute = routesWithSafety.reduce((fastest, current) => 
+        current.duration < fastest.duration ? current : fastest
+      );
+      
+      console.log(`🚦 Evaluating ${routesWithSafety.length} routes...`);
+      routesWithSafety.forEach((r, i) => {
+        const extraMinutes = Math.round((r.duration - fastestRoute.duration) / 60);
+        console.log(`Route ${i + 1}: Safety=${r.safety.score.toFixed(1)}, +${extraMinutes}min`);
       });
 
-      // Use the safest route (or fastest if equally safe)
-      const bestRoute = routesWithSafety[0];
+      // Filter routes: alleen routes die max 10 minuten langer zijn dan snelste
+      const MAX_EXTRA_TIME = 600; // 10 minuten in seconden
+      const viableRoutes = routesWithSafety.filter(r => 
+        (r.duration - fastestRoute.duration) <= MAX_EXTRA_TIME
+      );
+      
+      console.log(`✅ ${viableRoutes.length} routes within 10 min of fastest`);
+
+      // Selecteer de veiligste route uit de viable routes
+      let bestRoute = viableRoutes[0];
+      for (const route of viableRoutes) {
+        // Prefereer veiligere routes
+        if (route.safety.score > bestRoute.safety.score) {
+          bestRoute = route;
+        } 
+        // Als safety scores gelijk zijn (binnen 5 punten), kies snelste
+        else if (Math.abs(route.safety.score - bestRoute.safety.score) < 5 && route.duration < bestRoute.duration) {
+          bestRoute = route;
+        }
+      }
+      
+      const extraTime = Math.round((bestRoute.duration - fastestRoute.duration) / 60);
+      console.log(`🎯 Selected route: Safety=${bestRoute.safety.score.toFixed(1)}, +${extraTime}min`);
+
       const coordinates = bestRoute.coordinates;
       const distanceMeters = bestRoute.distance;
       const durationSeconds = bestRoute.duration;

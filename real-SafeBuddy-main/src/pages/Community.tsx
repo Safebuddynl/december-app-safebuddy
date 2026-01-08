@@ -17,14 +17,50 @@ const Community = () => {
   }, []);
 
   const fetchReports = async () => {
-    const { data, error } = await supabase
-      .from("safety_reports")
-      .select("*")
-      .order("created_at", { ascending: false });
-    
-    if (!error && data) {
-      setReports(data);
+    // Haal beide safety_reports en map_points op
+    const [safetyReportsResponse, mapPointsResponse] = await Promise.all([
+      supabase
+        .from("safety_reports")
+        .select("*")
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("map_points")
+        .select("*")
+        .order("created_at", { ascending: false })
+    ]);
+
+    const allReports = [];
+
+    // Voeg safety_reports toe
+    if (!safetyReportsResponse.error && safetyReportsResponse.data) {
+      allReports.push(...safetyReportsResponse.data.map(r => ({
+        ...r,
+        location_address: r.location_address || 'Onbekende locatie',
+        source: 'user_report'
+      })));
     }
+
+    // Voeg map_points toe (converteer naar safety_reports format)
+    if (!mapPointsResponse.error && mapPointsResponse.data) {
+      allReports.push(...mapPointsResponse.data.map(mp => ({
+        id: mp.id,
+        report_type: mp.title,
+        location_address: mp.description?.substring(0, 50) || 'Geverifieerde melding',
+        severity: mp.severity === 'critical' ? 'high' : mp.severity,
+        time_of_day: 'Onbekend',
+        description: mp.description || '',
+        upvotes: mp.upvotes,
+        created_at: mp.created_at,
+        is_verified: mp.is_verified,
+        source: 'imported'
+      })));
+    }
+
+    // Sorteer op datum (nieuwste eerst)
+    allReports.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    setReports(allReports);
+    console.log(`📊 Loaded ${allReports.length} total reports`);
   };
 
   const getSeverityColor = (severity: string) => {
@@ -87,7 +123,14 @@ const Community = () => {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-start justify-between gap-2 mb-2">
                           <div className="flex-1">
-                            <h3 className="font-semibold text-foreground mb-1">{report.report_type}</h3>
+                            <div className="flex items-center gap-2 mb-1">
+                              <h3 className="font-semibold text-foreground">{report.report_type}</h3>
+                              {report.is_verified && (
+                                <Badge variant="outline" className="text-xs bg-blue-500/10 text-blue-500 border-blue-500/20">
+                                  Geverifieerd
+                                </Badge>
+                              )}
+                            </div>
                             <div className="flex items-center gap-2 text-sm text-muted-foreground">
                               <span className="truncate">{report.location_address}</span>
                             </div>
