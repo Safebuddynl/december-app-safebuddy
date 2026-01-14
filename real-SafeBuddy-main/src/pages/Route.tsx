@@ -284,7 +284,7 @@ const Route = () => {
   };
 
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: MouseEvent | TouchEvent) => {
       if (startInputRef.current && !startInputRef.current.contains(event.target as Node)) {
         setShowStartSuggestions(false);
       }
@@ -293,7 +293,11 @@ const Route = () => {
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    document.addEventListener("touchstart", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("touchstart", handleClickOutside);
+    };
   }, []);
 
   const handleGetCurrentLocation = () => {
@@ -334,35 +338,87 @@ const Route = () => {
 
   const searchSuggestions = async (query: string, isStart: boolean) => {
     if (!query.trim() || query === "My Location") return;
+    console.log('🔍 Searching for:', query, 'isStart:', isStart);
+    
+    const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN;
+    
     try {
+      // Get user's current location for proximity sorting
+      let proximityParam = '';
+      if (navigator.geolocation && mapCenter) {
+        // Use map center as proximity point (usually user's location or last viewed area)
+        proximityParam = `&proximity=${mapCenter[1]},${mapCenter[0]}`;
+      }
+      
+      // Use Mapbox Geocoding API instead of Nominatim (better CORS support)
       const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=5&addressdetails=1`
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?access_token=${mapboxToken}&limit=5&language=nl&country=NL,BE${proximityParam}`
       );
+      
+      if (!response.ok) {
+        throw new Error(`Mapbox API error: ${response.status}`);
+      }
+      
       const data = await response.json();
-      if (data && data.length > 0) {
+      console.log('📍 Mapbox results:', data.features?.length || 0, 'items');
+      
+      if (data.features && data.features.length > 0) {
+        // Convert Mapbox format to our format
+        const suggestions = data.features.map((feature: any) => ({
+          display_name: feature.place_name,
+          lat: feature.center[1].toString(),
+          lon: feature.center[0].toString(),
+        }));
+        
         if (isStart) {
-          setStartSuggestions(data);
+          setStartSuggestions(suggestions);
           setShowStartSuggestions(true);
+          console.log('✅ Start suggestions shown:', suggestions.length);
         } else {
-          setDestinationSuggestions(data);
+          setDestinationSuggestions(suggestions);
           setShowDestinationSuggestions(true);
+          console.log('✅ Destination suggestions shown:', suggestions.length);
         }
       }
     } catch (error) {
-      console.error("Search failed:", error);
+      console.error("Mapbox search failed:", error);
+      // Fallback to Nominatim if Mapbox fails
+      try {
+        const response = await fetch(
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=5&addressdetails=1`
+        );
+        const data = await response.json();
+        if (data && data.length > 0) {
+          if (isStart) {
+            setStartSuggestions(data);
+            setShowStartSuggestions(true);
+          } else {
+            setDestinationSuggestions(data);
+            setShowDestinationSuggestions(true);
+          }
+        }
+      } catch (fallbackError) {
+        console.error("Nominatim fallback also failed:", fallbackError);
+      }
     }
   };
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (start && start !== "My Location") searchSuggestions(start, true);
+      if (start && start !== "My Location") {
+        console.log('⏰ Timer fired for start:', start);
+        searchSuggestions(start, true);
+      }
     }, 500);
     return () => clearTimeout(timer);
   }, [start]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (destination) searchSuggestions(destination, false);
+      if (destination) {
+        console.log('⏰ Timer fired for destination:', destination);
+        searchSuggestions(destination, false);
+      }
     }, 500);
     return () => clearTimeout(timer);
   }, [destination]);
@@ -416,8 +472,8 @@ const Route = () => {
         const currentZoom = map.getZoom();
         const radius = Math.max(8, Math.min(45, currentZoom * 2.8));
         const blur = Math.max(8, Math.min(35, currentZoom * 2.2));
-        const markerRadius = Math.max(3, Math.min(8, currentZoom * 0.5));
-        const markerWeight = currentZoom > 12 ? 2 : 1;
+        const markerRadius = Math.max(2.2, Math.min(4.3, currentZoom * 0.26));
+        const markerWeight = currentZoom > 12 ? 1.5 : 1;
         
         const heatData: [number, number, number][] = heatPoints.map((point) => {
           const intensity = point.report.severity === "high" ? 1.0 : point.report.severity === "medium" ? 0.6 : 0.3;
@@ -662,8 +718,8 @@ const Route = () => {
           
           const distance = calculateDistance(lat, lng, point.lat, point.lng);
           
-          // Alleen kijken naar punten binnen 200m van de route
-          if (distance < 0.2) {
+          // Alleen kijken naar punten binnen 500m van de route
+          if (distance < 0.5) {
             checkedReports.add(point.report.id);
             
             // Bereken leeftijd van melding in dagen
@@ -685,8 +741,8 @@ const Route = () => {
               ageFactor = 0.9; // Week: 90%
             }
             
-            // Distance factor: dichterbij = gevaarlijker (lineair van 200m tot 50m)
-            const distanceFactor = Math.max(0.5, 1.0 - (distance / 0.2));
+            // Distance factor: dichterbij = gevaarlijker (lineair van 0.5km tot 0.1km)
+            const distanceFactor = Math.max(0.5, 1.0 - (distance / 0.5));
             
             // Combineer severity, age en distance
             let penalty = 0;
@@ -728,13 +784,100 @@ const Route = () => {
         throw new Error('Mapbox token ontbreekt');
       }
       
-      // Mapbox Directions API call
-      const mapboxUrl = `https://api.mapbox.com/directions/v5/${profile}/${startLocation.lng},${startLocation.lat};${destinationLocation.lng},${destinationLocation.lat}?alternatives=true&geometries=geojson&overview=full&access_token=${mapboxToken}`;
+      // Detecteer gevaarlijke zones tussen start en bestemming
+      const now = new Date();
+      const dangerZones: Array<{ lat: number; lng: number; severity: string; penalty: number }> = [];
+      
+      // Vind directe lijn tussen start en bestemming
+      const midLat = (startLocation.lat + destinationLocation.lat) / 2;
+      const midLng = (startLocation.lng + destinationLocation.lng) / 2;
+      const routeDistance = calculateDistance(startLocation.lat, startLocation.lng, destinationLocation.lat, destinationLocation.lng);
+      
+      for (const point of heatPoints) {
+        // Bereken afstand tot de midpoint van de route
+        const distToMid = calculateDistance(midLat, midLng, point.lat, point.lng);
+        
+        // Alleen kijken naar punten die relatief dichtbij de directe lijn liggen
+        if (distToMid < routeDistance * 0.6) {
+          const reportDate = new Date(point.report.created_at);
+          const ageInDays = (now.getTime() - reportDate.getTime()) / (1000 * 60 * 60 * 24);
+          
+          // Alleen recente, ernstige meldingen
+          if (ageInDays < 90 && point.report.severity === "high") {
+            let ageFactor = 1.0;
+            if (ageInDays > 30) ageFactor = 0.8;
+            else if (ageInDays > 7) ageFactor = 0.9;
+            
+            dangerZones.push({
+              lat: point.lat,
+              lng: point.lng,
+              severity: point.report.severity,
+              penalty: 40 * ageFactor
+            });
+          }
+        }
+      }
+      
+      // Genereer waypoints om grote gevaarlijke zones heen
+      const waypoints: Array<{ lng: number; lat: number }> = [];
+      
+      if (dangerZones.length > 0) {
+        // Sorteer op penalty (ernstigste eerst)
+        dangerZones.sort((a, b) => b.penalty - a.penalty);
+        
+        // Neem maximaal 2 belangrijkste gevaarlijke zones
+        const topDangerZones = dangerZones.slice(0, 2);
+        
+        for (const zone of topDangerZones) {
+          // Bereken vector van start naar bestemming
+          const vecLat = destinationLocation.lat - startLocation.lat;
+          const vecLng = destinationLocation.lng - startLocation.lng;
+          
+          // Bereken loodrechte vector (90 graden gedraaid)
+          const perpLat = -vecLng;
+          const perpLng = vecLat;
+          const perpLength = Math.sqrt(perpLat * perpLat + perpLng * perpLng);
+          
+          // Normaliseer en schaal naar 500m (ongeveer 0.0045 graden)
+          const detourDistance = 0.0045;
+          const offsetLat = (perpLat / perpLength) * detourDistance;
+          const offsetLng = (perpLng / perpLength) * detourDistance;
+          
+          // Creëer waypoint naast de gevaarlijke zone (probeer beide kanten)
+          const waypoint1 = {
+            lng: zone.lng + offsetLng,
+            lat: zone.lat + offsetLat
+          };
+          
+          const waypoint2 = {
+            lng: zone.lng - offsetLng,
+            lat: zone.lat - offsetLat
+          };
+          
+          // Kies de kant die het dichtst bij de route ligt
+          const dist1 = calculateDistance(midLat, midLng, waypoint1.lat, waypoint1.lng);
+          const dist2 = calculateDistance(midLat, midLng, waypoint2.lat, waypoint2.lng);
+          
+          waypoints.push(dist1 < dist2 ? waypoint1 : waypoint2);
+        }
+        
+        console.log(`🚧 Detected ${dangerZones.length} danger zones, adding ${waypoints.length} waypoints to avoid them`);
+      }
+      
+      // Bouw de Mapbox URL met waypoints
+      let coordinatesString = `${startLocation.lng},${startLocation.lat}`;
+      for (const wp of waypoints) {
+        coordinatesString += `;${wp.lng},${wp.lat}`;
+      }
+      coordinatesString += `;${destinationLocation.lng},${destinationLocation.lat}`;
+      
+      const mapboxUrl = `https://api.mapbox.com/directions/v5/${profile}/${coordinatesString}?alternatives=true&geometries=geojson&overview=full&access_token=${mapboxToken}`;
       
       console.log('Fetching route from Mapbox...');
       console.log('Profile:', profile);
       console.log('Start:', startLocation.lat, startLocation.lng);
       console.log('Destination:', destinationLocation.lat, destinationLocation.lng);
+      console.log('Waypoints:', waypoints.length);
       
       const routeResponse = await fetch(mapboxUrl);
       const routeData = await routeResponse.json();
@@ -979,8 +1122,8 @@ const Route = () => {
       <div ref={mapContainerRef} className="flex-1 w-full z-0" style={{ minHeight: "calc(100vh - 80px)" }} />
 
       {/* Floating Search Card - Google Maps style */}
-      <div className="absolute top-4 left-4 right-4 z-[1000]">
-        <Card className="shadow-lg border-0 bg-background/95 backdrop-blur-sm">
+      <div className="absolute top-4 left-4 right-4 z-[1000] pointer-events-none">
+        <Card className="shadow-lg border-0 bg-background/95 backdrop-blur-sm pointer-events-auto">
           <CardContent className="p-3 space-y-2">
             {/* Search inputs row */}
             <div className="flex gap-2 items-center">
@@ -989,6 +1132,10 @@ const Route = () => {
                   placeholder="Start location"
                   value={start}
                   onChange={(e) => setStart(e.target.value)}
+                  onFocus={() => {
+                    console.log('Start input focused, value:', start);
+                    if (start && start !== "My Location") searchSuggestions(start, true);
+                  }}
                   className="h-10 text-sm pr-8 bg-muted/50 border-0"
                 />
                 <Button
@@ -1000,10 +1147,26 @@ const Route = () => {
                   <Locate className="h-4 w-4" />
                 </Button>
                 {showStartSuggestions && startSuggestions.length > 0 && (
-                  <div className="absolute top-full left-0 right-0 mt-1 bg-background border border-border rounded-lg shadow-lg z-50 max-h-48 overflow-y-auto">
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-background border-2 border-primary rounded-lg shadow-2xl z-[99999] max-h-[300px] overflow-y-auto pointer-events-auto">
                     {startSuggestions.map((s, i) => (
-                      <button key={i} onClick={() => selectStartSuggestion(s)} className="w-full text-left px-3 py-2 text-sm hover:bg-muted truncate">
-                        {s.display_name}
+                      <button 
+                        key={i} 
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          console.log('Start suggestion clicked:', s.display_name);
+                          selectStartSuggestion(s);
+                        }}
+                        onTouchEnd={(e) => { 
+                          e.preventDefault(); 
+                          e.stopPropagation(); 
+                          console.log('Start suggestion touched:', s.display_name);
+                          selectStartSuggestion(s); 
+                        }}
+                        className="w-full text-left px-4 py-3 text-sm hover:bg-muted active:bg-primary/20 border-b last:border-b-0 transition-colors touch-manipulation"
+                      >
+                        <div className="font-medium break-words line-clamp-2">{s.display_name}</div>
                       </button>
                     ))}
                   </div>
@@ -1014,13 +1177,33 @@ const Route = () => {
                   placeholder="Destination"
                   value={destination}
                   onChange={(e) => setDestination(e.target.value)}
+                  onFocus={() => {
+                    console.log('Destination input focused, value:', destination);
+                    if (destination) searchSuggestions(destination, false);
+                  }}
                   className="h-10 text-sm bg-muted/50 border-0"
                 />
                 {showDestinationSuggestions && destinationSuggestions.length > 0 && (
-                  <div className="absolute top-full left-0 right-0 mt-1 bg-background border border-border rounded-lg shadow-lg z-50 max-h-48 overflow-y-auto">
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-background border-2 border-primary rounded-lg shadow-2xl z-[99999] max-h-[300px] overflow-y-auto pointer-events-auto">
                     {destinationSuggestions.map((s, i) => (
-                      <button key={i} onClick={() => selectDestinationSuggestion(s)} className="w-full text-left px-3 py-2 text-sm hover:bg-muted truncate">
-                        {s.display_name}
+                      <button 
+                        key={i}
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          console.log('Destination suggestion clicked:', s.display_name);
+                          selectDestinationSuggestion(s);
+                        }}
+                        onTouchEnd={(e) => { 
+                          e.preventDefault(); 
+                          e.stopPropagation(); 
+                          console.log('Destination suggestion touched:', s.display_name);
+                          selectDestinationSuggestion(s); 
+                        }}
+                        className="w-full text-left px-4 py-3 text-sm hover:bg-muted active:bg-primary/20 border-b last:border-b-0 transition-colors touch-manipulation"
+                      >
+                        <div className="font-medium break-words line-clamp-2">{s.display_name}</div>
                       </button>
                     ))}
                   </div>

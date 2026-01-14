@@ -62,7 +62,22 @@ This project is built with:
 
 ## How can I deploy this project?
 
-Simply open [Lovable](https://lovable.dev/projects/e4a5f238-3fb4-4a5e-a2a9-a2789aeb5a04) and click on Share -> Publish.
+### Automatic deployment via Netlify
+
+The project is configured for automatic deployment. Every push to `main` will automatically deploy the app.
+
+**Setup:**
+1. Push your code to GitHub
+2. Go to [Netlify](https://app.netlify.com)
+3. Click "Add new site" → "Import an existing project"
+4. Connect your GitHub repository
+5. Add environment variables (see `.env` file or `TEAM-SETUP.md`)
+6. Click "Deploy site"
+
+Every push to `main` will now automatically deploy! 🚀
+
+**For team members:** See [TEAM-SETUP.md](TEAM-SETUP.md) for local development setup.
+**For Supabase setup:** See [SUPABASE-SETUP.md](SUPABASE-SETUP.md) for database configuration.
 
 ## Can I connect a custom domain to my Lovable project?
 
