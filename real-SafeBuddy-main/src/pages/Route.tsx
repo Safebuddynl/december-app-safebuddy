@@ -23,6 +23,15 @@ const RedIcon = L.icon({
   popupAnchor: [0, -48],
 });
 
+// Beautiful 3D green marker for start location
+const GreenIcon = L.icon({
+  iconUrl: 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iNDgiIHZpZXdCb3g9IjAgMCAzMiA0OCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9ImdyYWQiIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMCUiIHkyPSIxMDAlIj48c3RvcCBvZmZzZXQ9IjAlIiBzdHlsZT0ic3RvcC1jb2xvcjojMjJjNTVlO3N0b3Atb3BhY2l0eToxIi8+PHN0b3Agb2Zmc2V0PSIxMDAlIiBzdHlsZT0ic3RvcC1jb2xvcjojMTZhMzRhO3N0b3Atb3BhY2l0eToxIi8+PC9saW5lYXJHcmFkaWVudD48ZmlsdGVyIGlkPSJzaGFkb3ciPjxmZUdhdXNzaWFuQmx1ciBpbj0iU291cmNlQWxwaGEiIHN0ZERldmlhdGlvbj0iMS41Ii8+PGZlT2Zmc2V0IGR4PSIwIiBkeT0iMiIgcmVzdWx0PSJvZmZzZXRibHVyIi8+PGZlQ29tcG9uZW50VHJhbnNmZXI+PGZlRnVuY0EgdHlwZT0ibGluZWFyIiBzbG9wZT0iMC40Ii8+PC9mZUNvbXBvbmVudFRyYW5zZmVyPjxmZU1lcmdlPjxmZU1lcmdlTm9kZS8+PGZlTWVyZ2VOb2RlIGluPSJTb3VyY2VHcmFwaGljIi8+PC9mZU1lcmdlPjwvZmlsdGVyPjwvZGVmcz48cGF0aCBkPSJNMTYgMkM5LjkgMiA1IDYuOSA1IDEzYzAgOC4yIDExIDI1IDExIDI1czExLTE2LjggMTEtMjVjMC02LjEtNC45LTExLTExLTExem0wIDE1Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDR6IiBmaWxsPSJ1cmwoI2dyYWQpIiBmaWx0ZXI9InVybCgjc2hhZG93KSIvPjxjaXJjbGUgY3g9IjE2IiBjeT0iMTMiIHI9IjMiIGZpbGw9IiNmZmZmZmYiIG9wYWNpdHk9IjAuOSIvPjwvc3ZnPg==',
+  shadowUrl: iconShadow,
+  iconSize: [32, 48],
+  iconAnchor: [16, 48],
+  popupAnchor: [0, -48],
+});
+
 delete (L.Icon.Default.prototype as any)._getIconUrl;
 L.Icon.Default.mergeOptions({ iconUrl: icon, shadowUrl: iconShadow });
 
@@ -32,6 +41,13 @@ interface Location {
   name: string;
 }
 
+interface RouteStep {
+  instruction: string;
+  distance: number; // in meters
+  duration: number; // in seconds
+  coordinates: [number, number][];
+}
+
 interface RouteInfo {
   distance: string;
   duration: string;
@@ -39,6 +55,7 @@ interface RouteInfo {
   safetyScore?: number;
   dangerousAreas?: string[];
   message?: string;
+  steps?: RouteStep[];
 }
 
 interface SearchSuggestion {
@@ -104,6 +121,7 @@ const Route = () => {
   const [destinationSuggestions, setDestinationSuggestions] = useState<SearchSuggestion[]>([]);
   const [showStartSuggestions, setShowStartSuggestions] = useState(false);
   const [showDestinationSuggestions, setShowDestinationSuggestions] = useState(false);
+  const [showWarningsModal, setShowWarningsModal] = useState(false);
   
   // Heatmap state
   const [reports, setReports] = useState<SafetyReport[]>([]);
@@ -116,11 +134,19 @@ const Route = () => {
   const [stats, setStats] = useState({ high: 0, medium: 0, low: 0 });
   const [currentUser, setCurrentUser] = useState<any>(null);
   
+  // Route selection state
+  const [fastestRouteOption, setFastestRouteOption] = useState<RouteInfo | null>(null);
+  const [safeestRouteOption, setSafeestRouteOption] = useState<RouteInfo | null>(null);
+  const [showRouteSelector, setShowRouteSelector] = useState(false);
+  
   // Navigation state
   const [isNavigating, setIsNavigating] = useState(false);
   const [currentPosition, setCurrentPosition] = useState<Location | null>(null);
   const [heading, setHeading] = useState<number>(0);
+  const [currentStep, setCurrentStep] = useState<number>(0);
+  const [distanceToNextTurn, setDistanceToNextTurn] = useState<number | null>(null);
   const watchIdRef = useRef<number | null>(null);
+  const isNavigatingRef = useRef<boolean>(false);
   const currentPositionMarkerRef = useRef<L.Marker | null>(null);
   
   const startInputRef = useRef<HTMLDivElement>(null);
@@ -141,6 +167,14 @@ const Route = () => {
   useEffect(() => {
     applyTimeFilter();
   }, [timeFilter, reports]);
+
+  // Recalculate route when travel mode changes
+  useEffect(() => {
+    if (startLocation && destinationLocation && routeInfo) {
+      console.log(`🔄 Travel mode changed to ${travelMode}, recalculating route...`);
+      handleGetRoute();
+    }
+  }, [travelMode]);
 
   const fetchReports = async () => {
     const { data, error } = await supabase
@@ -289,40 +323,87 @@ const Route = () => {
     };
   }, []);
 
-  const handleGetCurrentLocation = () => {
-    if (navigator.geolocation) {
-      toast.loading("Getting your location...");
-      navigator.geolocation.getCurrentPosition(
-        async (position) => {
-          const location: Location = {
-            lat: position.coords.latitude,
-            lng: position.coords.longitude,
-            name: "My Location",
-          };
-          try {
-            const response = await fetch(
-              `https://nominatim.openstreetmap.org/reverse?lat=${location.lat}&lon=${location.lng}&format=json`
-            );
-            const data = await response.json();
-            if (data.display_name) {
-              location.name = data.display_name;
-            }
-          } catch (error) {
-            console.error("Reverse geocoding failed:", error);
-          }
-          setStart("My Location");
-          setStartLocation(location);
-          setMapCenter([location.lat, location.lng]);
-          setMapZoom(15);
-          toast.dismiss();
-          toast.success("Location detected");
-        },
-        () => {
-          toast.dismiss();
-          toast.error("Unable to get your location");
-        }
-      );
+  const handleGetCurrentLocation = async () => {
+    // Debug: Show alert so user can see what's happening on mobile
+    const isSecure = window.location.protocol === 'https:' || window.location.hostname === 'localhost';
+    
+    if (!isSecure) {
+      toast.error("HTTPS is vereist voor locatie. Open de site via https://");
+      return;
     }
+
+    // Check if geolocation is supported
+    if (!navigator.geolocation) {
+      toast.error("Geolocation wordt niet ondersteund door je browser");
+      return;
+    }
+
+    toast.loading("Locatie ophalen...");
+    
+    // Skip permissions API check on iOS as it's not fully supported
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    
+    if (!isIOS && navigator.permissions) {
+      try {
+        const permission = await navigator.permissions.query({ name: 'geolocation' });
+        if (permission.state === 'denied') {
+          toast.dismiss();
+          toast.error("Locatie toegang is geblokkeerd. Ga naar je browser instellingen.");
+          return;
+        }
+      } catch (e) {
+        // Permissions API not supported, continue anyway
+      }
+    }
+    
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const location: Location = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          name: "My Location",
+        };
+        try {
+          const response = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${location.lat}&lon=${location.lng}&format=json`
+          );
+          const data = await response.json();
+          if (data.display_name) {
+            location.name = data.display_name;
+          }
+        } catch (error) {
+          console.error("Reverse geocoding failed:", error);
+        }
+        setStart("My Location");
+        setStartLocation(location);
+        setMapCenter([location.lat, location.lng]);
+        setMapZoom(15);
+        toast.dismiss();
+        toast.success("Locatie gevonden");
+      },
+      (error) => {
+        console.error("Geolocation error:", error.code, error.message);
+        toast.dismiss();
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            toast.error("📍 Locatie geweigerd. Sta toe in instellingen: Instellingen > Safari > Locatietoegang");
+            break;
+          case error.POSITION_UNAVAILABLE:
+            toast.error("📍 GPS niet beschikbaar. Zet GPS aan en probeer opnieuw.");
+            break;
+          case error.TIMEOUT:
+            toast.error("📍 Locatie ophalen duurde te lang. Probeer opnieuw.");
+            break;
+          default:
+            toast.error("📍 Kon locatie niet ophalen. Probeer opnieuw.");
+        }
+      },
+      {
+        enableHighAccuracy: false,
+        timeout: 30000,
+        maximumAge: 60000
+      }
+    );
   };
 
   const searchSuggestions = async (query: string, isStart: boolean) => {
@@ -419,7 +500,14 @@ const Route = () => {
     const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN;
     console.log('Mapbox token:', mapboxToken ? 'Found' : 'Missing');
     
-    const map = L.map(mapContainerRef.current).setView(mapCenter, mapZoom);
+    const map = L.map(mapContainerRef.current, {
+      zoomControl: false // Disable default zoom control
+    }).setView(mapCenter, mapZoom);
+    
+    // Add zoom control to top-left, only visible on desktop
+    L.control.zoom({
+      position: 'topleft'
+    }).addTo(map);
     
     let tile;
     if (mapboxToken) {
@@ -614,7 +702,7 @@ const Route = () => {
     if (startLocation) {
       if (startMarkerRef.current) startMarkerRef.current.setLatLng([startLocation.lat, startLocation.lng]);
       else {
-        startMarkerRef.current = L.marker([startLocation.lat, startLocation.lng], { icon: RedIcon }).addTo(map);
+        startMarkerRef.current = L.marker([startLocation.lat, startLocation.lng], { icon: GreenIcon }).addTo(map);
       }
     } else if (startMarkerRef.current) {
       map.removeLayer(startMarkerRef.current);
@@ -896,35 +984,30 @@ const Route = () => {
         console.log(`Route ${i + 1}: Safety=${r.safety.score.toFixed(1)}, +${extraMinutes}min`);
       });
 
-      // Filter routes: alleen routes die max 10 minuten langer zijn dan snelste
-      const MAX_EXTRA_TIME = 600; // 10 minuten in seconden
+      // Filter routes: alleen routes die max 15 minuten langer zijn dan snelste
+      const MAX_EXTRA_TIME = 900; // 15 minuten in seconden
       const viableRoutes = routesWithSafety.filter(r => 
         (r.duration - fastestRoute.duration) <= MAX_EXTRA_TIME
       );
       
-      console.log(`✅ ${viableRoutes.length} routes binnen 10 min van snelste`);
+      console.log(`✅ ${viableRoutes.length} routes binnen 15 min van snelste`);
 
       // Selecteer de veiligste route uit de viable routes
-      let bestRoute = viableRoutes[0];
+      let safeestRoute = viableRoutes[0];
       for (const route of viableRoutes) {
-        // Prefereer veiligere routes
-        if (route.safety.score > bestRoute.safety.score) {
-          bestRoute = route;
-        } 
-        // Als safety scores gelijk zijn (binnen 5 punten), kies snelste
-        else if (Math.abs(route.safety.score - bestRoute.safety.score) < 5 && route.duration < bestRoute.duration) {
-          bestRoute = route;
+        if (route.safety.score > safeestRoute.safety.score) {
+          safeestRoute = route;
         }
       }
-      
-      const extraTime = Math.round((bestRoute.duration - fastestRoute.duration) / 60);
-      console.log(`🎯 Selected route: Safety=${bestRoute.safety.score.toFixed(1)}, +${extraTime}min`);
 
-      const coordinates = bestRoute.coordinates;
-      const distanceMeters = bestRoute.distance;
-      const durationSeconds = bestRoute.duration;
-      const safetyScore = bestRoute.safety.score;
-      const dangerousAreas = bestRoute.safety.dangerousAreas;
+      const safetyDifference = safeestRoute.safety.score - fastestRoute.safety.score;
+      console.log(`🎯 Snelste: Safety=${fastestRoute.safety.score.toFixed(1)}, ${Math.round(fastestRoute.duration / 60)}min | Veiligst: Safety=${safeestRoute.safety.score.toFixed(1)}, ${Math.round(safeestRoute.duration / 60)}min | Verschil: +${safetyDifference.toFixed(1)}`);
+
+      const coordinates = safeestRoute.coordinates;
+      const distanceMeters = safeestRoute.distance;
+      const durationSeconds = safeestRoute.duration;
+      const safetyScore = safeestRoute.safety.score;
+      const dangerousAreas = safeestRoute.safety.dangerousAreas;
 
       // Calculate distance and duration
       const distanceKm = distanceMeters / 1000;
@@ -937,18 +1020,97 @@ const Route = () => {
           ? "Route is relatief veilig met kleine zorgen"
           : "Route is vrij van veiligheidsproblemen";
 
-      setRouteInfo({
+      // Extract steps from selected Mapbox response
+      let steps: RouteStep[] = [];
+      if (safeestRoute.route.legs) {
+        for (const leg of safeestRoute.route.legs) {
+          if (leg.steps) {
+            for (const step of leg.steps) {
+              if (step.maneuver) {
+                const instruction = step.maneuver.instruction || 'Continue';
+                steps.push({
+                  instruction: instruction,
+                  distance: step.distance,
+                  duration: step.duration,
+                  coordinates: step.geometry?.coordinates as [number, number][] || []
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // Create safest route option
+      const safeestRouteInfo: RouteInfo = {
         distance: distanceKm.toFixed(2) + " km",
         duration: durationMinutes + " min",
         coordinates: coordinates,
         safetyScore: safetyScore,
         dangerousAreas: dangerousAreas,
         message: message,
-      });
+        steps: steps,
+      };
+
+      // Create fastest route option
+      const fastestCoordinates = fastestRoute.coordinates;
+      const fastestDistanceMeters = fastestRoute.distance;
+      const fastestDurationSeconds = fastestRoute.duration;
+      const fastestSafetyScore = fastestRoute.safety.score;
+      const fastestDangerousAreas = fastestRoute.safety.dangerousAreas;
+      const fastestDistanceKm = fastestDistanceMeters / 1000;
+      const fastestDurationMinutes = Math.round(fastestDurationSeconds / 60);
+      const fastestMessage =
+        fastestSafetyScore < 70
+          ? "Waarschuwing: Deze snelste route passeert gemelde veiligheidsproblemen"
+          : fastestSafetyScore < 90
+          ? "Snelste route heeft kleine veiligheidsrisico's"
+          : "Snelste route is ook veilig!";
+
+      // Extract steps for fastest route
+      let fastestSteps: RouteStep[] = [];
+      if (fastestRoute.route.legs) {
+        for (const leg of fastestRoute.route.legs) {
+          if (leg.steps) {
+            for (const step of leg.steps) {
+              if (step.maneuver) {
+                const instruction = step.maneuver.instruction || 'Continue';
+                fastestSteps.push({
+                  instruction: instruction,
+                  distance: step.distance,
+                  duration: step.duration,
+                  coordinates: step.geometry?.coordinates as [number, number][] || []
+                });
+              }
+            }
+          }
+        }
+      }
+
+      const fastestRouteInfo: RouteInfo = {
+        distance: fastestDistanceKm.toFixed(2) + " km",
+        duration: fastestDurationMinutes + " min",
+        coordinates: fastestCoordinates,
+        safetyScore: fastestSafetyScore,
+        dangerousAreas: fastestDangerousAreas,
+        message: fastestMessage,
+        steps: fastestSteps,
+      };
+
+      // Store both options but don't show selector - just use safest route
+      setSafeestRouteOption(safeestRouteInfo);
+      setFastestRouteOption(fastestRouteInfo);
+      // setShowRouteSelector(false); // Don't show the selector
+      
+      // Set safest route as default
+      setRouteInfo(safeestRouteInfo);
+      
+      // Show warnings modal if there are dangerous areas
+      if (safeestRouteInfo.dangerousAreas && safeestRouteInfo.dangerousAreas.length > 0) {
+        setShowWarningsModal(true);
+      }
 
       toast.dismiss();
-      if (safetyScore < 70) toast.warning(message);
-      else toast.success("Route berekend!");
+      toast.success("Route berekend!");
     } catch (error: any) {
       console.error("Routing error:", error);
       console.error("Error details:", error.message);
@@ -976,31 +1138,51 @@ const Route = () => {
 
   // Start navigation mode
   const startNavigation = () => {
+    // Check if we have a destination
+    if (!routeInfo) {
+      toast.error("Bereken eerst een route");
+      return;
+    }
+
     if (!navigator.geolocation) {
       toast.error("GPS niet beschikbaar");
       return;
     }
 
-    // Get current position first and center map
+    // Check if we have start and destination locations
+    if (!startLocation && !start) {
+      toast.error("Stel eerst een startpunt in");
+      return;
+    }
+
+    if (!destinationLocation && !destination) {
+      toast.error("Stel eerst een bestemming in");
+      return;
+    }
+
+    toast.loading("Navigatie starten...");
+
+    // Get current position for continuous tracking
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const initialPos: Location = {
+        const currentPos: Location = {
           lat: position.coords.latitude,
           lng: position.coords.longitude,
           name: "Current Position",
         };
         
-        setCurrentPosition(initialPos);
+        setCurrentPosition(currentPos);
         
-        // Center map on current position immediately
-        if (mapRef.current) {
-          mapRef.current.setView([initialPos.lat, initialPos.lng], 17, { animate: true });
-        }
+        // Don't center map on current position - keep the route view
+        // mapRef.current.setView() will be called only when user manually pans
         
+        isNavigatingRef.current = true;
         setIsNavigating(true);
-        toast.success("Navigatie gestart");
+        setCurrentStep(0);
+        toast.dismiss();
+        toast.success(`Navigatie gestart naar ${destination || destinationLocation?.name}`);
 
-        // Watch position continuously
+        // Watch position continuously for real-time navigation
         watchIdRef.current = navigator.geolocation.watchPosition(
           (position) => {
             const newPos: Location = {
@@ -1014,34 +1196,104 @@ const Route = () => {
             // Calculate heading if available
             if (position.coords.heading !== null) {
               setHeading(position.coords.heading);
+              
+              // Rotate map based on device heading during navigation
+              if (mapRef.current) {
+                const container = mapRef.current.getContainer();
+                if (container) {
+                  container.style.transform = `rotate(${position.coords.heading}deg)`;
+                  container.style.transformOrigin = 'center center';
+                  container.style.transition = 'transform 0.3s ease-out';
+                }
+              }
             }
             
-            // Auto-center map on current position with smooth animation
-            if (mapRef.current) {
+            // Center map on user position during navigation (Google Maps style)
+            if (mapRef.current && isNavigatingRef.current) {
               mapRef.current.setView([newPos.lat, newPos.lng], 18, { 
                 animate: true,
-                duration: 0.5
+                duration: 0.3
               });
+            }
+            
+            // Update current step based on distance and calculate distance to next turn
+            if (routeInfo && routeInfo.steps && routeInfo.steps.length > 0) {
+              const userLat = newPos.lat;
+              const userLng = newPos.lng;
+              let closestStepIndex = 0;
+              let minDistance = Infinity;
+              let distanceToNextTurn = Infinity;
+              
+              // Find the closest upcoming step
+              for (let i = currentStep; i < routeInfo.steps.length; i++) {
+                const step = routeInfo.steps[i];
+                if (step.coordinates && step.coordinates.length > 0) {
+                  const [stepLng, stepLat] = step.coordinates[0];
+                  const distance = calculateDistance(userLat, userLng, stepLat, stepLng);
+                  
+                  if (i === currentStep) {
+                    distanceToNextTurn = distance; // Save distance to current/next turn
+                  }
+                  
+                  if (distance < minDistance && distance < 0.05) { // Within 50m
+                    minDistance = distance;
+                    closestStepIndex = i;
+                  }
+                }
+              }
+              
+              // Store distance to next turn for display
+              if (distanceToNextTurn !== Infinity) {
+                const metersToTurn = Math.round(distanceToNextTurn * 1000);
+                setDistanceToNextTurn(metersToTurn);
+              }
+              
+              if (closestStepIndex >= 0 && closestStepIndex !== currentStep) {
+                setCurrentStep(Math.min(closestStepIndex + 1, routeInfo.steps.length - 1));
+              }
+              
+              // Re-routing detection: if user is more than 200m off route
+              const maxAllowedDeviation = 0.2; // 200m in km
+              if (minDistance > maxAllowedDeviation) {
+                console.warn(`⚠️ User ${(minDistance * 1000).toFixed(0)}m off route, consider re-routing`);
+                // In production, you could trigger automatic re-routing here
+              }
             }
           },
           (error) => {
             console.error("GPS error:", error);
-            toast.error("GPS locatie kon niet worden verkregen");
+            // Continue tracking, don't interrupt navigation
           },
           {
-            enableHighAccuracy: true,
-            timeout: 5000,
-            maximumAge: 0,
+            enableHighAccuracy: false,
+            timeout: 10000,
+            maximumAge: 5000,
           }
         );
       },
       (error) => {
-        console.error("Initial GPS error:", error);
-        toast.error("Kon beginlocatie niet ophalen");
+        console.error("GPS error:", error);
+        toast.dismiss();
+        
+        // Show error but offer to continue anyway
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            toast.error("GPS toegang geweigerd. Sta locatie toe.");
+            break;
+          case error.POSITION_UNAVAILABLE:
+            toast.error("GPS niet beschikbaar. Zet GPS aan.");
+            break;
+          case error.TIMEOUT:
+            toast.error("GPS timeout. Probeer opnieuw.");
+            break;
+          default:
+            toast.error("GPS error. Probeer opnieuw.");
+        }
       },
       {
-        enableHighAccuracy: true,
-        timeout: 10000,
+        enableHighAccuracy: false,
+        timeout: 15000,
+        maximumAge: 30000
       }
     );
   };
@@ -1052,8 +1304,22 @@ const Route = () => {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
+    
+    // Reset map rotation
+    if (mapRef.current) {
+      const container = mapRef.current.getContainer();
+      if (container) {
+        container.style.transform = 'rotate(0deg)';
+        container.style.transition = 'transform 0.3s ease-out';
+      }
+    }
+    
+    isNavigatingRef.current = false;
     setIsNavigating(false);
     setCurrentPosition(null);
+    setHeading(0);
+    setCurrentStep(0);
+    setDistanceToNextTurn(null);
     toast.info("Navigatie gestopt");
   };
 
@@ -1237,7 +1503,7 @@ const Route = () => {
   };
 
   return (
-    <div className="min-h-screen bg-background pb-20 flex flex-col relative">
+    <div className="min-h-screen bg-background pb-20 flex flex-col relative" data-route-page="true">
       {/* Map takes full height */}
       <div ref={mapContainerRef} className="flex-1 w-full z-0" style={{ minHeight: "calc(100vh - 80px)" }} />
 
@@ -1252,6 +1518,7 @@ const Route = () => {
                   placeholder="Start location"
                   value={start}
                   onChange={(e) => setStart(e.target.value)}
+                  onClick={(e) => (e.currentTarget as HTMLInputElement).select()}
                   onFocus={() => {
                     console.log('Start input focused, value:', start);
                     if (start && start !== "My Location") searchSuggestions(start, true);
@@ -1297,6 +1564,7 @@ const Route = () => {
                   placeholder="Destination"
                   value={destination}
                   onChange={(e) => setDestination(e.target.value)}
+                  onClick={(e) => (e.currentTarget as HTMLInputElement).select()}
                   onFocus={() => {
                     console.log('Destination input focused, value:', destination);
                     if (destination) searchSuggestions(destination, false);
@@ -1388,13 +1656,13 @@ const Route = () => {
 
         {/* Route Info (shown after route is calculated) */}
         {routeInfo && routeInfo.safetyScore !== undefined && (
-          <Card className={`mt-2 shadow-lg border-0 ${routeInfo.safetyScore >= 90 ? 'bg-success/10' : routeInfo.safetyScore >= 70 ? 'bg-warning/10' : 'bg-destructive/10'}`}>
+          <Card className={`mt-2 shadow-lg border-0 ${routeInfo.safetyScore >= 90 ? 'bg-success/80' : routeInfo.safetyScore >= 70 ? 'bg-warning/80' : 'bg-destructive/80'}`}>
             <CardContent className="p-3">
               <div className="flex items-center gap-2">
-                <Shield className={`h-4 w-4 ${routeInfo.safetyScore >= 90 ? 'text-success' : routeInfo.safetyScore >= 70 ? 'text-warning' : 'text-destructive'}`} />
+                <Shield className={`h-4 w-4 ${routeInfo.safetyScore >= 90 ? 'text-success-foreground' : routeInfo.safetyScore >= 70 ? 'text-warning-foreground' : 'text-destructive-foreground'}`} />
                 <div className="flex-1">
-                  <p className="font-semibold text-sm">{routeInfo.safetyScore >= 90 ? 'Safe Route' : routeInfo.safetyScore >= 70 ? 'Caution' : 'Be Careful'}</p>
-                  <p className="text-xs text-muted-foreground">Score: {routeInfo.safetyScore}/100 • {routeInfo.distance} • {routeInfo.duration}</p>
+                  <p className="font-semibold text-sm text-white">{routeInfo.safetyScore >= 90 ? 'Safe Route' : routeInfo.safetyScore >= 70 ? 'Caution' : 'Be Careful'}</p>
+                  <p className="text-xs text-white/80">Score: {Math.round(routeInfo.safetyScore)}/100 • {routeInfo.distance} • {routeInfo.duration}</p>
                 </div>
               </div>
             </CardContent>
@@ -1450,34 +1718,224 @@ const Route = () => {
         </div>
       )}
 
+      {/* Route Selector Modal - Absolute positioned */}
+      {showRouteSelector && fastestRouteOption && safeestRouteOption && (
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-[3000] w-[calc(100%-2rem)] max-w-md">
+          <Card className="shadow-2xl border-0 bg-background/95 backdrop-blur-md border-2 border-primary/50">
+            <CardContent className="p-4">
+              <h3 className="font-bold text-lg mb-4 text-center">🗺️ Kies je route</h3>
+              
+              <div className="space-y-3">
+                {/* Fastest Route Option */}
+                <div 
+                  onClick={() => {
+                    setRouteInfo(fastestRouteOption);
+                    setShowRouteSelector(false);
+                    toast.success("⚡ Snelste route geselecteerd");
+                  }}
+                  className="p-4 rounded-lg border-2 border-muted hover:border-primary cursor-pointer transition-all active:scale-95"
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="text-2xl">⚡</div>
+                    <div className="flex-1">
+                      <p className="font-bold text-base">Snelste route</p>
+                      <p className="text-sm text-muted-foreground mt-1">{fastestRouteOption.distance} • {fastestRouteOption.duration}</p>
+                      <div className="flex items-center gap-2 mt-2">
+                        <Badge variant="outline" className="text-sm font-bold">
+                          {Math.round(fastestRouteOption.safetyScore)}/100
+                        </Badge>
+                        <span className={`text-sm font-semibold ${fastestRouteOption.safetyScore >= 90 ? 'text-success' : fastestRouteOption.safetyScore >= 70 ? 'text-warning' : 'text-destructive'}`}>
+                          {fastestRouteOption.safetyScore >= 90 ? '✓ Veilig' : fastestRouteOption.safetyScore >= 70 ? '⚠ Matig' : '✗ Risicovol'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Safest Route Option */}
+                <div 
+                  onClick={() => {
+                    setRouteInfo(safeestRouteOption);
+                    setShowRouteSelector(false);
+                    toast.success("🛡️ Veiligste route geselecteerd");
+                  }}
+                  className="p-4 rounded-lg border-2 border-success/50 hover:border-success cursor-pointer transition-all active:scale-95 bg-success/5"
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="text-2xl">🛡️</div>
+                    <div className="flex-1">
+                      <p className="font-bold text-base">Veiligste route</p>
+                      <p className="text-sm text-muted-foreground mt-1">{safeestRouteOption.distance} • {safeestRouteOption.duration}</p>
+                      <div className="flex items-center gap-2 mt-2">
+                        <Badge variant="outline" className="text-sm font-bold">
+                          {Math.round(safeestRouteOption.safetyScore)}/100
+                        </Badge>
+                        <span className={`text-sm font-semibold ${safeestRouteOption.safetyScore >= 90 ? 'text-success' : safeestRouteOption.safetyScore >= 70 ? 'text-warning' : 'text-destructive'}`}>
+                          {safeestRouteOption.safetyScore >= 90 ? '✓ Veilig' : safeestRouteOption.safetyScore >= 70 ? '⚠ Matig' : '✗ Risicovol'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <Button 
+                variant="outline" 
+                size="sm" 
+                onClick={() => setShowRouteSelector(false)}
+                className="w-full mt-4"
+              >
+                Sluiten
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Warnings/Alerts Modal - appears after route calculation */}
+      {showWarningsModal && routeInfo && routeInfo.dangerousAreas && routeInfo.dangerousAreas.length > 0 && (
+        <div className="absolute inset-0 bg-black/60 z-[3500] flex items-center justify-center p-4">
+          <Card className="w-full max-w-md shadow-2xl border-0 bg-background overflow-hidden">
+            {/* Header with gradient */}
+            <div className={`p-5 ${routeInfo.safetyScore >= 90 ? 'bg-gradient-to-r from-success/20 to-success/10' : routeInfo.safetyScore >= 70 ? 'bg-gradient-to-r from-warning/20 to-warning/10' : 'bg-gradient-to-r from-destructive/20 to-destructive/10'}`}>
+              <div className="flex items-center gap-3 mb-1">
+                <div className={`p-2 rounded-full ${routeInfo.safetyScore >= 90 ? 'bg-success/20' : routeInfo.safetyScore >= 70 ? 'bg-warning/20' : 'bg-destructive/20'}`}>
+                  <AlertTriangle className={`h-5 w-5 ${routeInfo.safetyScore >= 90 ? 'text-success' : routeInfo.safetyScore >= 70 ? 'text-warning' : 'text-destructive'}`} />
+                </div>
+                <h3 className="font-bold text-base">Veiligheidsattentie</h3>
+              </div>
+              <p className="text-xs text-muted-foreground ml-11">{routeInfo.dangerousAreas.length} waarschuwing{routeInfo.dangerousAreas.length !== 1 ? 'en' : ''} op deze route</p>
+            </div>
+
+            {/* Content */}
+            <CardContent className="p-4">
+              <div className="space-y-3 max-h-[340px] overflow-y-auto">
+                {routeInfo.dangerousAreas.map((area, idx) => {
+                  // Parse the area text to extract risk level
+                  const isHighRisk = area.includes('(Hoog risico)');
+                  const isMediumRisk = area.includes('(Gemiddeld risico)');
+                  const isLowRisk = area.includes('(Laag risico)');
+                  
+                  const riskColor = isHighRisk ? 'border-destructive/40 bg-destructive/10' : 
+                                    isMediumRisk ? 'border-warning/40 bg-warning/10' : 
+                                    'border-success/40 bg-success/10';
+                  
+                  const riskBg = isHighRisk ? 'bg-destructive/20' : 
+                                isMediumRisk ? 'bg-warning/20' : 
+                                'bg-success/20';
+                  
+                  const riskText = isHighRisk ? 'text-destructive' : 
+                                  isMediumRisk ? 'text-warning' : 
+                                  'text-success';
+                  
+                  const riskLabel = isHighRisk ? 'Hoog risico' : 
+                                   isMediumRisk ? 'Gemiddeld risico' : 
+                                   'Laag risico';
+                  
+                  return (
+                    <div key={idx} className={`p-3 rounded-lg border ${riskColor} hover:opacity-80 transition-opacity`}>
+                      <div className="flex gap-2 items-start">
+                        <Badge className={`${riskBg} ${riskText} text-xs font-bold shrink-0 mt-0.5`}>
+                          {riskLabel}
+                        </Badge>
+                        <p className="text-sm font-medium flex-1 leading-snug">{area.split('(')[0].trim()}</p>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-2 ml-14">{area.split('bij')[1]?.trim() || ''}</p>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Footer */}
+              <div className="mt-4 pt-4 border-t border-muted">
+                <Button 
+                  onClick={() => setShowWarningsModal(false)}
+                  className="w-full"
+                >
+                  Ik ben alert en ga voorzichtig verder
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Turn-by-turn Navigation Card */}
+      {isNavigating && routeInfo && routeInfo.steps && routeInfo.steps.length > 0 && (
+        <div className="absolute top-20 left-2 right-2 sm:left-4 sm:right-4 z-[2000]">
+          <Card className="shadow-2xl border-0 bg-background/95 backdrop-blur-md">
+            <CardContent className="p-3 sm:p-4">
+              {currentStep < routeInfo.steps.length ? (
+                <>
+                  <div className="mb-2 flex justify-between items-center">
+                    <p className="text-xs text-muted-foreground">
+                      Stap {currentStep + 1} van {routeInfo.steps.length}
+                    </p>
+                    {distanceToNextTurn !== null && (
+                      <p className="text-xs font-semibold text-primary bg-primary/10 px-2 py-1 rounded">
+                        📍 {distanceToNextTurn < 1000 ? `${distanceToNextTurn}m` : `${(distanceToNextTurn / 1000).toFixed(1)}km`}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex gap-3 items-start">
+                    <div className="flex-shrink-0 w-12 h-12 rounded-full bg-primary/20 flex items-center justify-center">
+                      <Navigation className="h-6 w-6 text-primary" style={{ transform: `rotate(${heading}deg)` }} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-bold text-base text-foreground break-words">
+                        {routeInfo.steps[currentStep].instruction}
+                      </p>
+                      <p className="text-xs sm:text-sm text-muted-foreground mt-1">
+                        {(routeInfo.steps[currentStep].distance / 1000).toFixed(1)} km •{' '}
+                        {Math.round(routeInfo.steps[currentStep].duration / 60)} min
+                      </p>
+                      {currentStep < routeInfo.steps.length - 1 && (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Volgende: {routeInfo.steps[currentStep + 1].instruction}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="text-center py-2">
+                  <p className="font-bold text-base text-success">🎉 Je bent aangekomen!</p>
+                  <p className="text-xs text-muted-foreground mt-1">Bestemming bereikt</p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
       {/* Bottom Navigation Card */}
       {routeInfo && (
-        <div className="absolute bottom-24 left-4 right-4 z-[1000]">
+        <div className="absolute bottom-40 sm:bottom-32 left-2 right-2 sm:left-4 sm:right-4 z-[2000]">
           <Card className="shadow-2xl border-0 bg-background/95 backdrop-blur-md">
-            <CardContent className="p-4">
-              <div className="flex items-center gap-3 mb-3">
-                <Shield className={`h-6 w-6 ${routeInfo.safetyScore !== undefined && routeInfo.safetyScore >= 90 ? 'text-success' : routeInfo.safetyScore !== undefined && routeInfo.safetyScore >= 70 ? 'text-warning' : 'text-destructive'}`} />
-                <div className="flex-1">
-                  <p className="font-bold text-base">{routeInfo.safetyScore !== undefined && routeInfo.safetyScore >= 90 ? 'Veilige Route' : routeInfo.safetyScore !== undefined && routeInfo.safetyScore >= 70 ? 'Let op' : 'Wees voorzichtig'}</p>
+            <CardContent className="p-2 sm:p-4">
+              <div className="flex items-center gap-2 sm:gap-3 mb-2 sm:mb-3">
+                <Shield className={`h-5 w-5 sm:h-6 sm:w-6 ${routeInfo.safetyScore !== undefined && routeInfo.safetyScore >= 90 ? 'text-success' : routeInfo.safetyScore !== undefined && routeInfo.safetyScore >= 70 ? 'text-warning' : 'text-destructive'}`} />
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-sm sm:text-base">{routeInfo.safetyScore !== undefined && routeInfo.safetyScore >= 90 ? 'Veilige Route' : routeInfo.safetyScore !== undefined && routeInfo.safetyScore >= 70 ? 'Let op' : 'Wees voorzichtig'}</p>
                 </div>
                 {routeInfo.safetyScore !== undefined && (
-                  <Badge variant="outline" className="text-base font-bold px-3 py-1">
-                    {routeInfo.safetyScore}/100
+                  <Badge variant="outline" className="text-xs sm:text-base font-bold px-2 sm:px-3 py-0.5 sm:py-1">
+                    {Math.round(routeInfo.safetyScore)}/100
                   </Badge>
                 )}
               </div>
               {!isNavigating ? (
-                <Button size="lg" onClick={startNavigation} className="w-full h-12 text-base font-semibold mb-2">
-                  <Navigation className="h-5 w-5 mr-2" />
-                  Start Route
+                <Button size="sm" onClick={startNavigation} className="w-full h-10 sm:h-12 text-sm sm:text-base font-semibold mb-1 sm:mb-2">
+                  <Navigation className="h-4 w-4 sm:h-5 sm:w-5 mr-2" />
+                  Start
                 </Button>
               ) : (
-                <Button size="lg" variant="destructive" onClick={stopNavigation} className="w-full h-12 text-base font-semibold mb-2">
-                  <Square className="h-5 w-5 mr-1" />
-                  Stop Navigatie
+                <Button size="sm" variant="destructive" onClick={stopNavigation} className="w-full h-10 sm:h-12 text-sm sm:text-base font-semibold mb-1 sm:mb-2">
+                  <Square className="h-4 w-4 sm:h-5 sm:w-5 mr-1" />
+                  Stop
                 </Button>
               )}
-              <p className="text-sm text-muted-foreground text-center">{routeInfo.distance} • {routeInfo.duration}</p>
+              <p className="text-xs sm:text-sm text-muted-foreground text-center">{routeInfo.distance} • {routeInfo.duration}</p>
             </CardContent>
           </Card>
         </div>

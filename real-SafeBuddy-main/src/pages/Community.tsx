@@ -225,7 +225,7 @@ const Community = () => {
   };
 
   return (
-    <div className="min-h-screen bg-background pb-20 overflow-y-auto">
+    <div className="min-h-screen bg-background pb-20 overflow-y-auto" data-route-page="false">
       {/* Header with gradient */}
       <div className="gradient-header pt-12 pb-8 px-4">
         <div className="max-w-2xl mx-auto text-center">

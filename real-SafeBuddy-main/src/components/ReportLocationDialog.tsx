@@ -95,47 +95,93 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
     setShowSuggestions(false);
   };
 
-  const handleGetCurrentLocation = () => {
-    if (navigator.geolocation) {
-      toast.loading("Getting your location...");
-      navigator.geolocation.getCurrentPosition(
-        async (position) => {
-          try {
-            // Sla coördinaten direct op
-            setCoordinates({ 
-              lat: position.coords.latitude, 
-              lon: position.coords.longitude 
-            });
-            
-            const response = await fetch(
-              `https://nominatim.openstreetmap.org/reverse?lat=${position.coords.latitude}&lon=${position.coords.longitude}&format=json&addressdetails=1`
-            );
-            const data = await response.json();
-            if (data && data.address) {
-              const addr = data.address;
-              let streetAddress = "";
-              if (addr.road) {
-                streetAddress = addr.road;
-                if (addr.house_number) streetAddress += ` ${addr.house_number}`;
-              }
-              if (addr.city || addr.town || addr.village) {
-                streetAddress += streetAddress ? `, ${addr.city || addr.town || addr.village}` : (addr.city || addr.town || addr.village);
-              }
-              setLocationAddress(streetAddress || data.display_name);
-            }
-            toast.dismiss();
-            toast.success("Location detected");
-          } catch (error) {
-            toast.dismiss();
-            toast.error("Could not get address");
-          }
-        },
-        () => {
-          toast.dismiss();
-          toast.error("Unable to get your location");
-        }
-      );
+  const handleGetCurrentLocation = async () => {
+    // Check HTTPS
+    const isSecure = window.location.protocol === 'https:' || window.location.hostname === 'localhost';
+    if (!isSecure) {
+      toast.error("HTTPS is vereist voor locatie");
+      return;
     }
+
+    // Check if geolocation is supported
+    if (!navigator.geolocation) {
+      toast.error("Geolocation wordt niet ondersteund door je browser");
+      return;
+    }
+
+    toast.loading("Locatie ophalen...");
+    
+    // Skip permissions API on iOS
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    
+    if (!isIOS && navigator.permissions) {
+      try {
+        const permission = await navigator.permissions.query({ name: 'geolocation' });
+        if (permission.state === 'denied') {
+          toast.dismiss();
+          toast.error("Locatie toegang is geblokkeerd. Ga naar je browser instellingen.");
+          return;
+        }
+      } catch (e) {
+        // Continue anyway
+      }
+    }
+    
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        try {
+          // Sla coördinaten direct op
+          setCoordinates({ 
+            lat: position.coords.latitude, 
+            lon: position.coords.longitude 
+          });
+          
+          const response = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${position.coords.latitude}&lon=${position.coords.longitude}&format=json&addressdetails=1`
+          );
+          const data = await response.json();
+          if (data && data.address) {
+            const addr = data.address;
+            let streetAddress = "";
+            if (addr.road) {
+              streetAddress = addr.road;
+              if (addr.house_number) streetAddress += ` ${addr.house_number}`;
+            }
+            if (addr.city || addr.town || addr.village) {
+              streetAddress += streetAddress ? `, ${addr.city || addr.town || addr.village}` : (addr.city || addr.town || addr.village);
+            }
+            setLocationAddress(streetAddress || data.display_name);
+          }
+          toast.dismiss();
+          toast.success("Locatie gevonden");
+        } catch (error) {
+          console.error("Reverse geocoding failed:", error);
+          toast.dismiss();
+          toast.error("Kon adres niet ophalen");
+        }
+      },
+      (error) => {
+        toast.dismiss();
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            toast.error("Locatie toegang geweigerd. Sta locatie toe in je browser/telefoon instellingen.");
+            break;
+          case error.POSITION_UNAVAILABLE:
+            toast.error("Locatie niet beschikbaar. Zet GPS aan.");
+            break;
+          case error.TIMEOUT:
+            toast.error("Locatie ophalen duurde te lang. Probeer opnieuw.");
+            break;
+          default:
+            toast.error("Kon locatie niet ophalen");
+        }
+      },
+      {
+        enableHighAccuracy: false,
+        timeout: 30000,
+        maximumAge: 60000
+      }
+    );
   };
 
   const handleSubmit = async (e: React.FormEvent) => {

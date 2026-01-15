@@ -180,7 +180,7 @@ const Profile = () => {
   }
 
   return (
-    <div className="min-h-screen bg-background pb-20">
+    <div className="min-h-screen bg-background pb-20 overflow-y-auto" data-route-page="false">
       
       {/* Gradient Header Section */}
       <div className="gradient-header pt-12 pb-20 px-4 relative overflow-hidden">

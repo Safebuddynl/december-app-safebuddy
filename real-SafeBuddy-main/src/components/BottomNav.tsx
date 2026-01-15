@@ -12,7 +12,7 @@ const BottomNav = () => {
   ];
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-background border-t border-border z-50">
+    <nav className="fixed bottom-0 left-0 right-0 bg-background/95 backdrop-blur-md border-t border-border z-[9999] pb-safe">
       <div className="max-w-screen-xl mx-auto px-4">
         <div className="flex justify-around items-center h-16">
           {navItems.map((item) => {
@@ -24,7 +24,7 @@ const BottomNav = () => {
                 key={item.path}
                 to={item.path}
                 className={cn(
-                  "flex flex-col items-center justify-center gap-1 min-w-[60px] py-2 px-3 rounded-lg transition-all duration-200 ease-in-out active:scale-95",
+                  "flex flex-col items-center justify-center gap-1 min-w-[60px] py-2 px-3 rounded-lg transition-all duration-200 ease-in-out active:scale-95 touch-manipulation select-none",
                   isActive 
                     ? "text-primary bg-accent shadow-[0_0_15px_hsl(273_62%_68%_/_0.3)]" 
                     : "text-muted-foreground hover:text-primary hover:bg-accent/50"
