@@ -122,6 +122,48 @@ export type Database = {
         }
         Relationships: []
       }
+      map_points: {
+        Row: {
+          id: number
+          owner_id: string | null
+          title: string
+          description: string | null
+          report_type: string
+          severity: string
+          location: string
+          upvotes: number | null
+          is_verified: boolean | null
+          created_at: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          id?: number
+          owner_id?: string | null
+          title: string
+          description?: string | null
+          report_type: string
+          severity: string
+          location: string
+          upvotes?: number | null
+          is_verified?: boolean | null
+          created_at?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          id?: number
+          owner_id?: string | null
+          title?: string
+          description?: string | null
+          report_type?: string
+          severity?: string
+          location?: string
+          upvotes?: number | null
+          is_verified?: boolean | null
+          created_at?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
       profiles: {
         Row: {
           avatar_url: string | null

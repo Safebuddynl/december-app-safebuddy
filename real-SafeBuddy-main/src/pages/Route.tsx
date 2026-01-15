@@ -114,6 +114,7 @@ const Route = () => {
   const [showFilters, setShowFilters] = useState(false);
   const [selectedPoint, setSelectedPoint] = useState<HeatPoint | null>(null);
   const [stats, setStats] = useState({ high: 0, medium: 0, low: 0 });
+  const [currentUser, setCurrentUser] = useState<any>(null);
   
   // Navigation state
   const [isNavigating, setIsNavigating] = useState(false);
@@ -181,105 +182,93 @@ const Route = () => {
     const points: HeatPoint[] = [];
     
     try {
-      // Direct query with PostgREST computed columns for lat/lng
-      // We'll query the database and let PostgREST handle the geometry conversion
+      // Laad alle punten uit map_points (14000+ historische datapunten)
       const { data: rawData, error } = await supabase
         .from('map_points')
         .select('*');
-      // Geen limit - we willen alle ~14,903 punten zien
       
       if (error) {
         console.error('❌ Error fetching map points:', error);
-        return;
-      }
-      
-      if (!rawData || rawData.length === 0) {
-        console.log('⚠️ No map points found in database');
-        return;
-      }
-      
-      console.log(`📍 Loaded ${rawData.length} raw map points`);
-      console.log('Sample raw point:', rawData[0]);
-      
-      // Parse WKB hex strings to extract coordinates
-      // WKB format for POINT: starts with 0101000020E6100000 (header) + 16 bytes for X + 16 bytes for Y
-      rawData.forEach((mp: any) => {
-        try {
-          if (mp.location && typeof mp.location === 'string') {
-            // WKB hex string - we need to decode it
-            // Format: 0101000020 E6100000 [8 bytes X as hex] [8 bytes Y as hex]
-            const wkb = mp.location;
-            
-            // Skip the SRID and point type prefix (first 18 chars = 9 bytes)
-            // 01 = little endian
-            // 01000020 = point type with SRID
-            // E6100000 = SRID 4326
-            // Next 16 chars = longitude (8 bytes as double)
-            // Next 16 chars = latitude (8 bytes as double)
-            
-            if (wkb.length >= 50) {  // Min length for a WKB POINT
-              const coordsHex = wkb.substring(18); // Skip header
+      } else if (rawData && rawData.length > 0) {
+        console.log(`📍 Loaded ${rawData.length} map points from database`);
+        
+        rawData.forEach((mp: any) => {
+          try {
+            if (mp.location && typeof mp.location === 'string') {
+              const wkb = mp.location;
               
-              // Extract X (longitude) - first 16 hex chars = 8 bytes
-              const xHex = coordsHex.substring(0, 16);
-              // Extract Y (latitude) - next 16 hex chars = 8 bytes  
-              const yHex = coordsHex.substring(16, 32);
-              
-              // Convert hex to double (IEEE 754)
-              const lng = hexToDouble(xHex);
-              const lat = hexToDouble(yHex);
-              
-              if (!isNaN(lat) && !isNaN(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
-                points.push({
-                  lat,
-                  lng,
-                  report: {
-                    id: mp.id.toString(),
-                    location_address: mp.title || 'Onbekende locatie',
-                    severity: mp.severity === 'critical' ? 'high' : mp.severity,
-                    report_type: mp.report_type || 'other',
-                    created_at: mp.created_at,
-                    description: mp.description,
-                    upvotes: mp.upvotes || 0,
-                  },
-                });
-              } else {
-                console.warn(`Invalid coordinates: lat=${lat}, lng=${lng}`);
+              if (wkb.length >= 50) {
+                const coordsHex = wkb.substring(18);
+                const xHex = coordsHex.substring(0, 16);
+                const yHex = coordsHex.substring(16, 32);
+                
+                const lng = hexToDouble(xHex);
+                const lat = hexToDouble(yHex);
+                
+                if (!isNaN(lat) && !isNaN(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+                  points.push({
+                    lat,
+                    lng,
+                    report: {
+                      id: mp.id.toString(),
+                      location_address: mp.title || 'Onbekende locatie',
+                      severity: mp.severity === 'critical' ? 'high' : mp.severity,
+                      report_type: mp.report_type || 'other',
+                      created_at: mp.created_at,
+                      description: mp.description || '',
+                      upvotes: mp.upvotes || 0,
+                    },
+                  });
+                }
               }
             }
+          } catch (e) {
+            console.error('Error parsing WKB:', e, mp.id);
           }
-        } catch (e) {
-          console.error('Error parsing WKB:', e, mp.id);
-        }
-      });
+        });
+      }
       
-      console.log(`✅ Successfully parsed ${points.length} points for map`);
+      // Voeg nieuwe community reports toe aan dezelfde dataset
+      console.log(`📝 Adding ${reportData.length} new community reports`);
+      for (const report of reportData) {
+        try {
+          // Check if report already has coordinates from map_points
+          const existsInMapPoints = points.some(p => p.report.id === report.id);
+          if (existsInMapPoints) {
+            console.log(`Skip duplicate report ${report.id}`);
+            continue;
+          }
+          
+          // Geocode nieuwe reports met Mapbox (sneller en betrouwbaarder dan Nominatim)
+          const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN;
+          if (mapboxToken) {
+            const response = await fetch(
+              `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(report.location_address + ", Netherlands")}.json?access_token=${mapboxToken}&limit=1`
+            );
+            const data = await response.json();
+            if (data.features && data.features.length > 0) {
+              const [lng, lat] = data.features[0].center;
+              points.push({
+                lat,
+                lng,
+                report: {
+                  ...report,
+                  description: report.description || '',
+                },
+              });
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        } catch (error) {
+          console.error("Geocoding error:", error);
+        }
+      }
       
     } catch (err) {
       console.error('❌ Unexpected error:', err);
     }
     
-    // Voeg ook safety_reports toe (met geocoding)
-    for (const report of reportData.slice(0, 20)) {
-      try {
-        const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(report.location_address + ", Netherlands")}&format=json&limit=1`
-        );
-        const data = await response.json();
-        if (data && data.length > 0) {
-          points.push({
-            lat: parseFloat(data[0].lat),
-            lng: parseFloat(data[0].lon),
-            report,
-          });
-        }
-        await new Promise((resolve) => setTimeout(resolve, 150));
-      } catch (error) {
-        console.error("Geocoding error:", error);
-      }
-    }
-    
-    console.log(`🗺️ Loaded ${points.length} points on map`);
+    console.log(`🗺️ Total points loaded: ${points.length}`);
     setHeatPoints(points);
   };
 
@@ -718,8 +707,8 @@ const Route = () => {
           
           const distance = calculateDistance(lat, lng, point.lat, point.lng);
           
-          // Alleen kijken naar punten binnen 500m van de route
-          if (distance < 0.5) {
+          // Alleen kijken naar punten binnen 200m van de route
+          if (distance < 0.2) {
             checkedReports.add(point.report.id);
             
             // Bereken leeftijd van melding in dagen
@@ -741,8 +730,8 @@ const Route = () => {
               ageFactor = 0.9; // Week: 90%
             }
             
-            // Distance factor: dichterbij = gevaarlijker (lineair van 0.5km tot 0.1km)
-            const distanceFactor = Math.max(0.5, 1.0 - (distance / 0.5));
+            // Distance factor: dichterbij = gevaarlijker (lineair van 200m tot 50m)
+            const distanceFactor = Math.max(0.5, 1.0 - (distance / 0.2));
             
             // Combineer severity, age en distance
             let penalty = 0;
@@ -769,7 +758,7 @@ const Route = () => {
     };
 
     try {
-      // Mapbox Directions API met verschillende profiles voor auto, fiets en lopen
+      // Mapbox Directions API met waypoints om gevaarlijke zones te vermijden
       const profileMap: Record<TravelMode, string> = {
         car: "mapbox/driving",
         bike: "mapbox/cycling",
@@ -780,91 +769,85 @@ const Route = () => {
       const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN;
       
       if (!mapboxToken) {
-        console.error('Mapbox token niet gevonden!');
         throw new Error('Mapbox token ontbreekt');
       }
       
-      // Detecteer gevaarlijke zones tussen start en bestemming
-      const now = new Date();
-      const dangerZones: Array<{ lat: number; lng: number; severity: string; penalty: number }> = [];
-      
-      // Vind directe lijn tussen start en bestemming
-      const midLat = (startLocation.lat + destinationLocation.lat) / 2;
-      const midLng = (startLocation.lng + destinationLocation.lng) / 2;
+      // Bereken route afstand
       const routeDistance = calculateDistance(startLocation.lat, startLocation.lng, destinationLocation.lat, destinationLocation.lng);
+      console.log(`📏 Route afstand: ${routeDistance.toFixed(2)}km`);
       
-      for (const point of heatPoints) {
-        // Bereken afstand tot de midpoint van de route
-        const distToMid = calculateDistance(midLat, midLng, point.lat, point.lng);
+      // Voor korte routes (< 3km): check eerst op gevaarlijke punten op directe lijn
+      let waypoints: Array<{ lng: number; lat: number }> = [];
+      if (routeDistance < 3) {
+        const now = new Date();
+        const dangerousOnRoute: Array<{ lat: number; lng: number; type: string }> = [];
         
-        // Alleen kijken naar punten die relatief dichtbij de directe lijn liggen
-        if (distToMid < routeDistance * 0.6) {
+        for (const point of heatPoints) {
+          if (point.report.severity !== "high") continue;
+          
           const reportDate = new Date(point.report.created_at);
           const ageInDays = (now.getTime() - reportDate.getTime()) / (1000 * 60 * 60 * 24);
+          if (ageInDays >= 30) continue;
           
-          // Alleen recente, ernstige meldingen
-          if (ageInDays < 90 && point.report.severity === "high") {
-            let ageFactor = 1.0;
-            if (ageInDays > 30) ageFactor = 0.8;
-            else if (ageInDays > 7) ageFactor = 0.9;
-            
-            dangerZones.push({
-              lat: point.lat,
-              lng: point.lng,
-              severity: point.report.severity,
-              penalty: 40 * ageFactor
-            });
+          // Check of punt op directe lijn ligt (binnen 100m)
+          const distToStart = calculateDistance(startLocation.lat, startLocation.lng, point.lat, point.lng);
+          const distToEnd = calculateDistance(point.lat, point.lng, destinationLocation.lat, destinationLocation.lng);
+          const totalDist = distToStart + distToEnd;
+          const deviation = Math.abs(totalDist - routeDistance);
+          
+          if (deviation < 0.1) { // Binnen 100m van directe lijn
+            dangerousOnRoute.push({ lat: point.lat, lng: point.lng, type: point.report.report_type });
           }
         }
-      }
-      
-      // Genereer waypoints om grote gevaarlijke zones heen
-      const waypoints: Array<{ lng: number; lat: number }> = [];
-      
-      if (dangerZones.length > 0) {
-        // Sorteer op penalty (ernstigste eerst)
-        dangerZones.sort((a, b) => b.penalty - a.penalty);
         
-        // Neem maximaal 2 belangrijkste gevaarlijke zones
-        const topDangerZones = dangerZones.slice(0, 2);
-        
-        for (const zone of topDangerZones) {
-          // Bereken vector van start naar bestemming
+        if (dangerousOnRoute.length > 0) {
+          console.log(`⚠️ Korte route: ${dangerousOnRoute.length} gevaarlijke punten op directe lijn, voeg waypoint toe`);
+          
+          const blockPoint = dangerousOnRoute[0];
+          
+          // Bereken waypoint 400m naast het gevaarlijke punt
           const vecLat = destinationLocation.lat - startLocation.lat;
           const vecLng = destinationLocation.lng - startLocation.lng;
+          const vecLength = Math.sqrt(vecLat * vecLat + vecLng * vecLng);
           
-          // Bereken loodrechte vector (90 graden gedraaid)
-          const perpLat = -vecLng;
-          const perpLng = vecLat;
-          const perpLength = Math.sqrt(perpLat * perpLat + perpLng * perpLng);
+          const normVecLat = vecLat / vecLength;
+          const normVecLng = vecLng / vecLength;
           
-          // Normaliseer en schaal naar 500m (ongeveer 0.0045 graden)
-          const detourDistance = 0.0045;
-          const offsetLat = (perpLat / perpLength) * detourDistance;
-          const offsetLng = (perpLng / perpLength) * detourDistance;
+          // Loodrechte vector
+          const perpLat = -normVecLng;
+          const perpLng = normVecLat;
           
-          // Creëer waypoint naast de gevaarlijke zone (probeer beide kanten)
+          // Bereken positie van gevaarlijk punt op de lijn
+          const distToStart = calculateDistance(startLocation.lat, startLocation.lng, blockPoint.lat, blockPoint.lng);
+          const percentage = distToStart / routeDistance;
+          
+          const waypointOnLine = {
+            lat: startLocation.lat + (vecLat * percentage),
+            lng: startLocation.lng + (vecLng * percentage)
+          };
+          
+          // Waypoint 400m opzij
+          const detourDistance = 0.0036; // 400m
           const waypoint1 = {
-            lng: zone.lng + offsetLng,
-            lat: zone.lat + offsetLat
+            lng: waypointOnLine.lng + (perpLng * detourDistance),
+            lat: waypointOnLine.lat + (perpLat * detourDistance)
           };
           
           const waypoint2 = {
-            lng: zone.lng - offsetLng,
-            lat: zone.lat - offsetLat
+            lng: waypointOnLine.lng - (perpLng * detourDistance),
+            lat: waypointOnLine.lat - (perpLat * detourDistance)
           };
           
-          // Kies de kant die het dichtst bij de route ligt
-          const dist1 = calculateDistance(midLat, midLng, waypoint1.lat, waypoint1.lng);
-          const dist2 = calculateDistance(midLat, midLng, waypoint2.lat, waypoint2.lng);
+          // Kies de kant die het verst van het gevaarlijke punt ligt
+          const dist1 = calculateDistance(waypoint1.lat, waypoint1.lng, blockPoint.lat, blockPoint.lng);
+          const dist2 = calculateDistance(waypoint2.lat, waypoint2.lng, blockPoint.lat, blockPoint.lng);
+          waypoints.push(dist1 > dist2 ? waypoint1 : waypoint2);
           
-          waypoints.push(dist1 < dist2 ? waypoint1 : waypoint2);
+          console.log(`🔄 Waypoint toegevoegd ${(Math.max(dist1, dist2) * 1000).toFixed(0)}m van ${blockPoint.type}`);
         }
-        
-        console.log(`🚧 Detected ${dangerZones.length} danger zones, adding ${waypoints.length} waypoints to avoid them`);
       }
       
-      // Bouw de Mapbox URL met waypoints
+      // Bouw Mapbox URL (met of zonder waypoints)
       let coordinatesString = `${startLocation.lng},${startLocation.lat}`;
       for (const wp of waypoints) {
         coordinatesString += `;${wp.lng},${wp.lat}`;
@@ -874,28 +857,18 @@ const Route = () => {
       const mapboxUrl = `https://api.mapbox.com/directions/v5/${profile}/${coordinatesString}?alternatives=true&geometries=geojson&overview=full&access_token=${mapboxToken}`;
       
       console.log('Fetching route from Mapbox...');
-      console.log('Profile:', profile);
-      console.log('Start:', startLocation.lat, startLocation.lng);
-      console.log('Destination:', destinationLocation.lat, destinationLocation.lng);
-      console.log('Waypoints:', waypoints.length);
-      
       const routeResponse = await fetch(mapboxUrl);
       const routeData = await routeResponse.json();
       
-      console.log('Mapbox response status:', routeResponse.status);
-      console.log('Mapbox response data:', routeData);
-      
       if (!routeResponse.ok) {
-        console.error('Mapbox API error:', routeData);
         throw new Error(`Mapbox API fout: ${routeData.message || routeResponse.status}`);
       }
 
       if (!routeData.routes || routeData.routes.length === 0) {
-        console.error('Geen routes gevonden in response');
         throw new Error("Kon geen route berekenen");
       }
 
-      // Evaluate all routes for safety and pick the best one
+      // Evaluate all routes for safety
       const routesWithSafety = routeData.routes.map((route: any) => {
         const coordinates: [number, number][] = route.geometry.coordinates.map(
           (coord: number[]) => [coord[1], coord[0]]
@@ -929,7 +902,7 @@ const Route = () => {
         (r.duration - fastestRoute.duration) <= MAX_EXTRA_TIME
       );
       
-      console.log(`✅ ${viableRoutes.length} routes within 10 min of fastest`);
+      console.log(`✅ ${viableRoutes.length} routes binnen 10 min van snelste`);
 
       // Selecteer de veiligste route uit de viable routes
       let bestRoute = viableRoutes[0];
@@ -950,7 +923,6 @@ const Route = () => {
       const coordinates = bestRoute.coordinates;
       const distanceMeters = bestRoute.distance;
       const durationSeconds = bestRoute.duration;
-      
       const safetyScore = bestRoute.safety.score;
       const dangerousAreas = bestRoute.safety.dangerousAreas;
 
@@ -1095,15 +1067,163 @@ const Route = () => {
   }, []);
 
   const handleUpvote = async (reportId: string) => {
-    const report = reports.find(r => r.id === reportId);
-    if (!report) return;
-    const { error } = await supabase
-      .from("safety_reports")
-      .update({ upvotes: (report.upvotes || 0) + 1 })
+    // Check if user is logged in
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      toast.error("Log in om te liken");
+      return;
+    }
+    
+    // Zoek report in heatPoints (kan van beide tabellen komen)
+    const heatPoint = heatPoints.find(p => p.report.id === reportId);
+    if (!heatPoint) return;
+    
+    // Bepaal welke tabel (probeer eerst te vinden in reports array)
+    const reportInReports = reports.find(r => r.id === reportId);
+    const reportSource = reportInReports ? 'safety_reports' : 'map_points';
+    
+    // Check of user al heeft geliked
+    const { data: existingLike } = await supabase
+      .from('report_likes')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('report_id', reportId)
+      .eq('report_source', reportSource)
+      .single();
+    
+    const currentUpvotes = heatPoint.report.upvotes || 0;
+    
+    if (existingLike) {
+      // Unlike: verwijder de like
+      const { error: deleteError } = await supabase
+        .from('report_likes')
+        .delete()
+        .eq('id', existingLike.id);
+      
+      if (deleteError) {
+        toast.error("Kon niet unliken");
+        return;
+      }
+      
+      const newUpvotes = Math.max(currentUpvotes - 1, 0);
+      
+      // Update upvotes in de juiste tabel
+      const { error: updateError } = await supabase
+        .from(reportSource)
+        .update({ upvotes: newUpvotes })
+        .eq("id", reportId);
+      
+      if (!updateError) {
+        toast.success("Like verwijderd");
+        // Update lokaal in heatPoints
+        setHeatPoints(heatPoints.map(p => 
+          p.report.id === reportId 
+            ? { ...p, report: { ...p.report, upvotes: newUpvotes } }
+            : p
+        ));
+        if (reportSource === 'safety_reports') {
+          fetchReports(); // Refresh reports
+        }
+      }
+      return;
+    }
+    
+    // Like: voeg like toe
+    const newUpvotes = currentUpvotes + 1;
+    
+    // Voeg like toe aan report_likes tabel
+    const { error: likeError } = await supabase
+      .from('report_likes')
+      .insert({
+        user_id: user.id,
+        report_id: reportId,
+        report_source: reportSource
+      });
+    
+    if (likeError) {
+      toast.error("Kon niet liken");
+      return;
+    }
+    
+    // Update upvotes in de juiste tabel
+    const { error: updateError } = await supabase
+      .from(reportSource)
+      .update({ upvotes: newUpvotes })
       .eq("id", reportId);
-    if (!error) {
-      toast.success("Report validated!");
-      fetchReports();
+    
+    if (!updateError) {
+      toast.success("Report geliked!");
+      // Update lokaal in heatPoints
+      setHeatPoints(heatPoints.map(p => 
+        p.report.id === reportId 
+          ? { ...p, report: { ...p.report, upvotes: newUpvotes } }
+          : p
+      ));
+      if (reportSource === 'safety_reports') {
+        fetchReports(); // Refresh reports
+      }
+    }
+  };
+
+  const handleDeleteReport = async (reportId: string) => {
+    try {
+      // Check if user is logged in
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        toast.error('Log in om te verwijderen');
+        return;
+      }
+
+      // Find report to determine source
+      const heatPoint = heatPoints.find(p => p.report.id === reportId);
+      if (!heatPoint) return;
+      
+      const reportInReports = reports.find(r => r.id === reportId);
+      const reportSource = reportInReports ? 'safety_reports' : 'map_points';
+      
+      // Only allow deleting from safety_reports (user's own reports)
+      if (reportSource === 'map_points') {
+        toast.error('Je kunt alleen je eigen reports verwijderen');
+        return;
+      }
+
+      // Check if user owns the report
+      const { data: reportData } = await supabase
+        .from('safety_reports')
+        .select('user_id')
+        .eq('id', reportId)
+        .single();
+
+      if (!reportData || reportData.user_id !== user.id) {
+        toast.error('Je kunt alleen je eigen reports verwijderen');
+        return;
+      }
+
+      // Delete report_likes first (cascade)
+      await supabase
+        .from('report_likes')
+        .delete()
+        .eq('report_id', reportId)
+        .eq('report_source', 'safety_reports');
+
+      // Delete the report
+      const { error } = await supabase
+        .from('safety_reports')
+        .delete()
+        .eq('id', reportId);
+
+      if (error) throw error;
+
+      toast.success('Report verwijderd');
+      
+      // Update local state
+      setHeatPoints(heatPoints.filter(p => p.report.id !== reportId));
+      setReports(reports.filter(r => r.id !== reportId));
+      setSelectedPoint(null);
+      
+    } catch (error) {
+      console.error('Error deleting report:', error);
+      toast.error('Kon report niet verwijderen');
     }
   };
 
@@ -1314,9 +1434,16 @@ const Route = () => {
                 <Badge variant="outline" className="text-xs h-5">
                   <Clock className="h-3 w-3 mr-1" />{getTimeAgo(selectedPoint.report.created_at)}
                 </Badge>
-                <Button size="sm" variant="outline" onClick={() => handleUpvote(selectedPoint.report.id)} className="h-6 text-xs px-2">
-                  <ThumbsUp className="h-3 w-3 mr-1" />{selectedPoint.report.upvotes || 0}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="outline" onClick={() => handleUpvote(selectedPoint.report.id)} className="h-6 text-xs px-2">
+                    <ThumbsUp className="h-3 w-3 mr-1" />{selectedPoint.report.upvotes || 0}
+                  </Button>
+                  {currentUser && selectedPoint.report.user_id === currentUser.id && (
+                    <Button size="sm" variant="ghost" onClick={() => handleDeleteReport(selectedPoint.report.id)} className="h-6 w-6 p-0 text-destructive hover:text-destructive">
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  )}
+                </div>
               </div>
             </CardContent>
           </Card>

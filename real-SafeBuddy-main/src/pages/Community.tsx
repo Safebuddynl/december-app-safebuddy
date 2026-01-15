@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Plus, AlertTriangle, ThumbsUp } from "lucide-react";
+import { Plus, AlertTriangle, ThumbsUp, Trash2 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -7,13 +7,20 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import BottomNav from "@/components/BottomNav";
 import ReportLocationDialog from "@/components/ReportLocationDialog";
 import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 
 const Community = () => {
   const [reportDialogOpen, setReportDialogOpen] = useState(false);
   const [reports, setReports] = useState<any[]>([]);
+  const [currentUser, setCurrentUser] = useState<any>(null);
 
   useEffect(() => {
     fetchReports();
+    const getCurrentUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      setCurrentUser(user);
+    };
+    getCurrentUser();
   }, []);
 
   const fetchReports = async () => {
@@ -44,11 +51,11 @@ const Community = () => {
     if (!mapPointsResponse.error && mapPointsResponse.data) {
       allReports.push(...mapPointsResponse.data.map(mp => ({
         id: mp.id,
-        report_type: mp.title,
-        location_address: mp.description?.substring(0, 50) || 'Geverifieerde melding',
+        report_type: mp.title || 'Melding',
+        location_address: mp.report_type || mp.title || 'Geverifieerde melding',
         severity: mp.severity === 'critical' ? 'high' : mp.severity,
         time_of_day: 'Onbekend',
-        description: mp.description || '',
+        description: '', // Laat leeg om duplicatie te voorkomen
         upvotes: mp.upvotes,
         created_at: mp.created_at,
         is_verified: mp.is_verified,
@@ -69,10 +76,152 @@ const Community = () => {
     return "bg-muted text-muted-foreground";
   };
 
+  const handleDeleteReport = async (reportId: string, source: string) => {
+    try {
+      // Check if user is logged in
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        toast.error('Log in om te verwijderen');
+        return;
+      }
+
+      // Only allow deleting from safety_reports (user's own reports)
+      if (source !== 'user_report') {
+        toast.error('Je kunt alleen je eigen reports verwijderen');
+        return;
+      }
+
+      // Check if user owns the report
+      const { data: reportData } = await supabase
+        .from('safety_reports')
+        .select('user_id')
+        .eq('id', reportId)
+        .single();
+
+      if (!reportData || reportData.user_id !== user.id) {
+        toast.error('Je kunt alleen je eigen reports verwijderen');
+        return;
+      }
+
+      // Delete report_likes first (cascade)
+      await supabase
+        .from('report_likes')
+        .delete()
+        .eq('report_id', reportId)
+        .eq('report_source', 'safety_reports');
+
+      // Delete the report
+      const { error } = await supabase
+        .from('safety_reports')
+        .delete()
+        .eq('id', reportId);
+
+      if (error) throw error;
+
+      toast.success('Report verwijderd');
+      
+      // Update local state
+      setReports(reports.filter(r => r.id !== reportId));
+      
+    } catch (error) {
+      console.error('Error deleting report:', error);
+      toast.error('Kon report niet verwijderen');
+    }
+  };
+
   const getIconColor = (severity: string) => {
     if (severity === "high") return "bg-destructive/20 text-destructive";
     if (severity === "medium") return "bg-warning/20 text-warning";
     return "bg-muted text-muted-foreground";
+  };
+
+  const handleUpvote = async (reportId: string, source: string) => {
+    // Check if user is logged in
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      toast.error("Log in om te liken");
+      return;
+    }
+    
+    const report = reports.find(r => r.id === reportId);
+    if (!report) return;
+    
+    // Bepaal juiste tabel naam
+    const tableName = source === 'user_report' ? 'safety_reports' : 'map_points';
+    
+    // Check of user al heeft geliked
+    const { data: existingLike } = await supabase
+      .from('report_likes')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('report_id', reportId)
+      .eq('report_source', tableName)
+      .single();
+    
+    if (existingLike) {
+      // Unlike: verwijder de like
+      const { error: deleteError } = await supabase
+        .from('report_likes')
+        .delete()
+        .eq('id', existingLike.id);
+      
+      if (deleteError) {
+        toast.error("Kon niet unliken");
+        return;
+      }
+      
+      const newUpvotes = Math.max((report.upvotes || 0) - 1, 0);
+      
+      // Update in juiste tabel
+      const { error } = await supabase
+        .from(tableName)
+        .update({ upvotes: newUpvotes })
+        .eq("id", reportId);
+      
+      if (!error) {
+        toast.success("Like verwijderd");
+        // Update lokaal
+        setReports(reports.map(r => 
+          r.id === reportId ? { ...r, upvotes: newUpvotes } : r
+        ));
+      } else {
+        toast.error("Kon niet unliken");
+      }
+      return;
+    }
+    
+    // Like: voeg like toe
+    const newUpvotes = (report.upvotes || 0) + 1;
+    
+    // Voeg like toe aan report_likes tabel
+    const { error: likeError } = await supabase
+      .from('report_likes')
+      .insert({
+        user_id: user.id,
+        report_id: reportId,
+        report_source: tableName
+      });
+    
+    if (likeError) {
+      toast.error("Kon niet liken");
+      return;
+    }
+    
+    // Update in juiste tabel
+    const { error } = await supabase
+      .from(tableName)
+      .update({ upvotes: newUpvotes })
+      .eq("id", reportId);
+    
+    if (!error) {
+      toast.success("Report geliked!");
+      // Update lokaal
+      setReports(reports.map(r => 
+        r.id === reportId ? { ...r, upvotes: newUpvotes } : r
+      ));
+    } else {
+      toast.error("Kon niet liken");
+    }
   };
 
   return (
@@ -146,10 +295,23 @@ const Community = () => {
 
                         <div className="flex items-center justify-between">
                           <span className="text-xs text-muted-foreground capitalize">{report.time_of_day}</span>
-                          <button className="flex items-center gap-1 text-sm text-muted-foreground hover:text-primary transition-colors">
-                            <ThumbsUp className="h-4 w-4" />
-                            <span>{report.upvotes}</span>
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button 
+                              onClick={() => handleUpvote(report.id, report.source)}
+                              className="flex items-center gap-1 text-sm text-muted-foreground hover:text-primary transition-colors"
+                            >
+                              <ThumbsUp className="h-4 w-4" />
+                              <span>{report.upvotes || 0}</span>
+                            </button>
+                            {currentUser && report.user_id === currentUser.id && (
+                              <button 
+                                onClick={() => handleDeleteReport(report.id, report.source)}
+                                className="text-destructive hover:text-destructive/80 transition-colors p-1"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -179,7 +341,17 @@ const Community = () => {
                         <h3 className="font-semibold text-foreground mb-1">{report.report_type}</h3>
                         <p className="text-sm text-muted-foreground">{report.location_address}</p>
                       </div>
-                      <Badge className={getSeverityColor(report.severity)}>High</Badge>
+                      <div className="flex items-center gap-2">
+                        <Badge className={getSeverityColor(report.severity)}>High</Badge>
+                        {currentUser && report.user_id === currentUser.id && (
+                          <button 
+                            onClick={() => handleDeleteReport(report.id, report.source)}
+                            className="text-destructive hover:text-destructive/80 transition-colors p-1"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
@@ -207,7 +379,17 @@ const Community = () => {
                         <h3 className="font-semibold text-foreground mb-1">{report.report_type}</h3>
                         <p className="text-sm text-muted-foreground">{report.location_address}</p>
                       </div>
-                      <Badge className={getSeverityColor(report.severity)}>Medium</Badge>
+                      <div className="flex items-center gap-2">
+                        <Badge className={getSeverityColor(report.severity)}>Medium</Badge>
+                        {currentUser && report.user_id === currentUser.id && (
+                          <button 
+                            onClick={() => handleDeleteReport(report.id, report.source)}
+                            className="text-destructive hover:text-destructive/80 transition-colors p-1"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
@@ -235,7 +417,17 @@ const Community = () => {
                         <h3 className="font-semibold text-foreground mb-1">{report.report_type}</h3>
                         <p className="text-sm text-muted-foreground">{report.location_address}</p>
                       </div>
-                      <Badge className={getSeverityColor(report.severity)}>Low</Badge>
+                      <div className="flex items-center gap-2">
+                        <Badge className={getSeverityColor(report.severity)}>Low</Badge>
+                        {currentUser && report.user_id === currentUser.id && (
+                          <button 
+                            onClick={() => handleDeleteReport(report.id, report.source)}
+                            className="text-destructive hover:text-destructive/80 transition-colors p-1"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
