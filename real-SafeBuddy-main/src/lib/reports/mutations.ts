@@ -1,8 +1,9 @@
 import { supabase } from "@/integrations/supabase/client";
-import type { SafetyReport } from "./types";
+import type { LatLng } from "@/lib/geo";
+import type { SafetyReport, Severity } from "./types";
 
 /**
- * Writes against community reports: liking and deleting.
+ * Writes against community reports: creating, liking and deleting.
  *
  * Only rows in `safety_reports` can be changed. The imported historic dataset
  * is read-only, so `canLike` / `canDelete` gate the UI instead of letting the
@@ -18,6 +19,63 @@ export function canLike(report: SafetyReport): boolean {
 
 export function canDelete(report: SafetyReport, currentUserId: string | null): boolean {
   return report.source === "safety_reports" && !!currentUserId && report.userId === currentUserId;
+}
+
+export interface NewSafetyReport {
+  point: LatLng;
+  address: string;
+  reportType: string;
+  severity: Severity;
+  description?: string;
+  timeOfDay?: string | null;
+}
+
+/**
+ * Store a new community report and return it in the shape the map uses.
+ *
+ * Writes the same columns as `ReportLocationDialog`, including the PostGIS
+ * `location` point, so both entry points produce identical rows.
+ */
+export async function createSafetyReport(input: NewSafetyReport): Promise<SafetyReport> {
+  const { data: auth } = await supabase.auth.getUser();
+  const user = auth?.user;
+  if (!user) throw new Error("not-authenticated");
+
+  const description = input.description?.trim() ?? "";
+  const timeOfDay = input.timeOfDay ?? null;
+
+  const { data, error } = await supabase
+    .from("safety_reports")
+    .insert({
+      user_id: user.id,
+      location_address: input.address,
+      // PostGIS expects POINT(longitude latitude).
+      location: `POINT(${input.point.lng} ${input.point.lat})`,
+      report_type: input.reportType,
+      severity: input.severity,
+      time_of_day: timeOfDay,
+      description,
+    })
+    .select("id, created_at, upvotes")
+    .single();
+
+  if (error) throw error;
+
+  return {
+    id: String(data.id),
+    source: "safety_reports",
+    reportType: input.reportType,
+    locationAddress: input.address,
+    severity: input.severity,
+    description,
+    createdAt: data.created_at ?? new Date().toISOString(),
+    upvotes: data.upvotes ?? 0,
+    userId: user.id,
+    coordinates: { lat: input.point.lat, lng: input.point.lng },
+    municipality: null,
+    timeOfDay,
+    basis: "incident",
+  };
 }
 
 export interface ToggleLikeResult {

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { searchPlaces, type PlaceSuggestion } from "@/lib/geocoding";
 import type { LatLng } from "@/lib/geo";
+import { cn } from "@/lib/utils";
 
 /**
  * A search box that suggests addresses as the user types.
@@ -21,6 +22,9 @@ export interface LocationSearchInputProps {
   near?: LatLng;
   /** Rendered inside the input, e.g. a "use my location" button. */
   action?: React.ReactNode;
+  /** Extra classes for the input, e.g. to blend into a floating bar. */
+  inputClassName?: string;
+  ariaLabel?: string;
 }
 
 const LocationSearchInput = ({
@@ -30,6 +34,8 @@ const LocationSearchInput = ({
   placeholder,
   near,
   action,
+  inputClassName,
+  ariaLabel,
 }: LocationSearchInputProps) => {
   const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>([]);
   const [isOpen, setIsOpen] = useState(false);
@@ -96,12 +102,13 @@ const LocationSearchInput = ({
         onChange={(event) => onValueChange(event.target.value)}
         onFocus={() => suggestions.length > 0 && setIsOpen(true)}
         placeholder={placeholder}
-        className="h-10 border-0 bg-muted/50 pr-9 text-sm"
+        aria-label={ariaLabel ?? placeholder}
+        className={cn("h-10 border-0 bg-muted/50 pr-9 text-sm", inputClassName)}
       />
       {action}
 
       {isOpen && suggestions.length > 0 && (
-        <ul className="absolute left-0 right-0 top-full z-[1100] mt-1 max-h-[300px] overflow-y-auto rounded-lg border-2 border-primary bg-background shadow-2xl">
+        <ul className="absolute left-0 right-0 top-full z-[1100] mt-1 max-h-[300px] overflow-y-auto rounded-2xl border border-line bg-surface shadow-float">
           {suggestions.map((suggestion) => (
             <li key={`${suggestion.lat},${suggestion.lng}-${suggestion.label}`}>
               <button

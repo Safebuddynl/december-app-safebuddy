@@ -8,6 +8,7 @@ import { useTheme } from "@/contexts/ThemeContext";
 import { useLanguage } from "@/i18n/LanguageContext";
 import type { Language } from "@/i18n/translations";
 import { useState } from "react";
+import { useSafetyPreferences } from "@/hooks/useSafetyPreferences";
 
 interface SafetySettingsDialogProps {
   open: boolean;
@@ -18,6 +19,8 @@ const SafetySettingsDialog = ({ open, onOpenChange }: SafetySettingsDialogProps)
   const { theme, toggleTheme } = useTheme();
   const { language, setLanguage, t } = useLanguage();
   const [showLanguageMenu, setShowLanguageMenu] = useState(false);
+  // Stored on this device and shared with the profile's preferences card.
+  const { preferences, update } = useSafetyPreferences();
 
   const languages = [
     { id: "nl" as Language, label: "Nederlands", flag: "🇳🇱" },
@@ -81,21 +84,33 @@ const SafetySettingsDialog = ({ open, onOpenChange }: SafetySettingsDialogProps)
                   <Label className="text-base">{t("pushNotifications")}</Label>
                   <p className="text-sm text-muted-foreground">{t("receiveAlerts")}</p>
                 </div>
-                <Switch defaultChecked />
+                <Switch
+                  checked={preferences.pushNotifications}
+                  onCheckedChange={(checked) => update({ pushNotifications: checked })}
+                  aria-label={t("pushNotifications")}
+                />
               </div>
               <div className="flex items-center justify-between">
                 <div className="flex-1">
                   <Label className="text-base">{t("safetyAlerts")}</Label>
                   <p className="text-sm text-muted-foreground">{t("warningsArea")}</p>
                 </div>
-                <Switch defaultChecked />
+                <Switch
+                  checked={preferences.safetyAlerts}
+                  onCheckedChange={(checked) => update({ safetyAlerts: checked })}
+                  aria-label={t("safetyAlerts")}
+                />
               </div>
               <div className="flex items-center justify-between">
                 <div className="flex-1">
                   <Label className="text-base">{t("communityUpdates")}</Label>
                   <p className="text-sm text-muted-foreground">{t("newReportsNearby")}</p>
                 </div>
-                <Switch />
+                <Switch
+                  checked={preferences.communityUpdates}
+                  onCheckedChange={(checked) => update({ communityUpdates: checked })}
+                  aria-label={t("communityUpdates")}
+                />
               </div>
             </div>
           </div>

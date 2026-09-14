@@ -64,6 +64,15 @@ html, body {
 
     /* Primary Light: #A47BE0 = hsl(273, 62%, 68%) */
     --primary-light: 273 62% 68%;
+    /* Primary Hover (darker): #5F2F99 = hsl(273, 53%, 39%) */
+    --primary-hover: 273 53% 39%;
+    /* Primary Tint, for light backgrounds: #F2ECFA = hsl(266, 58%, 95%) */
+    --primary-tint: 266 58% 95%;
+
+    /* Info: cyan #06B6D4, a sparing accent for non-primary highlights such as
+       a "verified" badge. Never for primary actions. */
+    --info: 189 94% 43%;
+    --info-foreground: 0 0% 100%;
 
     /* Secondary: lighter purple */
     --secondary: 273 40% 60%;
@@ -92,8 +101,8 @@ html, body {
     --brand-purple: 273 51% 47%;
     --brand-light: 273 62% 68%;
     
-    --gradient-primary: linear-gradient(135deg, hsl(240 40% 50%), hsl(273 62% 68%));
-    --gradient-header: linear-gradient(135deg, hsl(240 40% 50%), hsl(273 62% 68%));
+    --gradient-primary: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--primary-light)));
+    --gradient-header: linear-gradient(135deg, hsl(var(--primary-hover)), hsl(var(--primary)) 55%, hsl(var(--primary-light)));
     --gradient-interactive: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--primary-light)));
     --shadow-card: 0 2px 12px -2px hsl(273 51% 47% / 0.15);
     --shadow-elevated: 0 8px 30px -4px hsl(273 51% 47% / 0.25);
@@ -124,6 +133,8 @@ html, body {
 
     --primary: 273 51% 55%;
     --primary-foreground: 0 0% 100%;
+    --primary-hover: 273 51% 47%;
+    --primary-tint: 273 40% 18%;
 
     --secondary: 273 40% 45%;
     --secondary-foreground: 0 0% 100%;
@@ -267,13 +278,84 @@ html, body {
   }
 }
 
-/* Brand colour from the SafeBuddy logo. The single source for map accents:
-   the safe route, the user's location and focus rings. */
+/* SafeBuddy design tokens. Use these (or their Tailwind names: brand, ink,
+   surface, tint, line, signal, panic) instead of loose hex values.
+
+   - brand: the purple from the logo. Primary actions, the safe route, the
+     user's location and focus rings.
+   - signal: cyan, sparingly, for secondary highlights such as live sharing.
+   - panic: red, reserved for the SOS button. Nothing else in the chrome is red,
+     so it never loses its meaning. (Green/amber/red on the map is severity
+     data, not chrome.) */
 :root {
   --brand: #733CB6;
+  --brand-hover: #5F2F99;
+  --brand-tint: #F2ECFA;
   /* A lighter, luminous take on the brand, for the route line on the map. */
   --brand-bright: #A66CFF;
   --brand-glow: #E4D2FF;
+
+  --ink: #1B1725;
+  --ink-soft: #5F5873;
+  --surface: #FFFFFF;
+  --bg-tint: #F4F1FA;
+  --line: #E7E1F2;
+
+  --signal: #06B6D4;
+  --panic: #E4342E;
+
+  --radius-panel: 24px;
+  --shadow-float: 0 8px 30px rgba(27, 23, 37, 0.16);
+
+  /* Floating panels: a light lavender veil, so the map stays visible. */
+  --surface-glass: rgba(221, 203, 250, 0.36);
+  --glass-edge: rgba(255, 255, 255, 0.22);
+  --glass-shadow: 0 4px 16px rgba(27, 23, 37, 0.1);
+  /* A light halo behind text and icons keeps them readable over a busy map. */
+  --glass-text-halo: 0 0 2px rgba(255, 255, 255, 0.9), 0 0 8px rgba(255, 255, 255, 0.85);
+  --glass-icon-halo: drop-shadow(0 0 3px rgba(255, 255, 255, 0.85));
+  /* Secondary text is darker on glass than on solid white. */
+  --glass-ink-soft: #3E3750;
+}
+
+.dark {
+  --brand-tint: #2C2240;
+  --ink: #F4F1FA;
+  --ink-soft: #B9B1CB;
+  --surface: #1E1A29;
+  --bg-tint: #272135;
+  --line: #342C45;
+  --shadow-float: 0 8px 30px rgba(0, 0, 0, 0.45);
+  --surface-glass: rgba(52, 32, 86, 0.4);
+  --glass-edge: rgba(255, 255, 255, 0.06);
+  --glass-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  --glass-text-halo: 0 0 2px rgba(0, 0, 0, 0.9), 0 0 8px rgba(0, 0, 0, 0.8);
+  --glass-icon-halo: drop-shadow(0 0 3px rgba(0, 0, 0, 0.8));
+  --glass-ink-soft: #DDD6EC;
+}
+
+/* Translucent tinted panel over the map. The blur is kept light on purpose:
+   a heavy blur smears the map into a flat colour and makes the panel read as
+   a solid box. Declared after the Tailwind utilities, so its softer shadow
+   wins over shadow-float. */
+.glass {
+  /* Everything inside that uses ink-soft (labels, placeholders, icons) gets
+     the darker glass variant. */
+  --ink-soft: var(--glass-ink-soft);
+  background-color: var(--surface-glass);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  backdrop-filter: blur(10px) saturate(140%);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--glass-shadow);
+  text-shadow: var(--glass-text-halo);
+}
+
+.glass svg {
+  filter: var(--glass-icon-halo);
+}
+
+.glass input::placeholder {
+  text-shadow: var(--glass-text-halo);
 }
 
 /* Keep the Mapbox logo and attribution above the bottom sheet. SafeMap sets

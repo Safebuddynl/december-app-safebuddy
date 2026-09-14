@@ -18,9 +18,18 @@ export interface ReportCardProps {
   onClose: () => void;
   onLike: (report: SafetyReport) => void;
   onDelete: (report: SafetyReport) => void;
+  /** Drop the card chrome when shown inside another panel. */
+  embedded?: boolean;
 }
 
-const ReportCard = ({ report, currentUserId, onClose, onLike, onDelete }: ReportCardProps) => {
+const ReportCard = ({
+  report,
+  currentUserId,
+  onClose,
+  onLike,
+  onDelete,
+  embedded = false,
+}: ReportCardProps) => {
   const iconTone =
     report.severity === "high"
       ? "bg-destructive/20 text-destructive"
@@ -29,8 +38,12 @@ const ReportCard = ({ report, currentUserId, onClose, onLike, onDelete }: Report
         : "bg-success/20 text-success";
 
   return (
-    <Card className="border-primary/20 shadow-lg">
-      <CardContent className="p-3">
+    <Card
+      className={
+        embedded ? "border-0 bg-transparent shadow-none" : "border-primary/20 shadow-lg"
+      }
+    >
+      <CardContent className={embedded ? "p-0" : "p-3"}>
         <div className="mb-2 flex items-start justify-between">
           <div className="flex items-center gap-2">
             <div className={`flex h-8 w-8 items-center justify-center rounded-full ${iconTone}`}>

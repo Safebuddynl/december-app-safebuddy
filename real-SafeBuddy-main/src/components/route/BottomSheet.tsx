@@ -10,13 +10,13 @@ import { cn } from "@/lib/utils";
 
 /**
  * A panel floating at the bottom of the map that can be dragged between
- * snap points: hidden, peek (only the top part) and expanded.
+ * snap points: hidden, peek (only the top part), half and full.
  *
  * Dragging works on the handle and the peek area. The expanded content
  * scrolls normally, so a drag never fights a scroll.
  */
 
-export type SheetState = "hidden" | "peek" | "expanded";
+export type SheetState = "hidden" | "peek" | "half" | "expanded";
 
 export interface BottomSheetProps {
   state: SheetState;
@@ -29,6 +29,8 @@ export interface BottomSheetProps {
   onVisibleHeightChange?: (pixels: number) => void;
   label: string;
   canHide?: boolean;
+  /** Add a snap point halfway, for long content such as a list. */
+  withHalf?: boolean;
   /** Positions the sheet, e.g. `bottom-20`. */
   className?: string;
 }
@@ -39,6 +41,8 @@ const EDGE_GAP = 12;
 const DRAG_THRESHOLD = 6;
 /** Pixels per millisecond that count as a flick. */
 const FLICK_VELOCITY = 0.5;
+/** Content shown at the half snap point, as a share of the viewport height. */
+const HALF_CONTENT_SHARE = 0.32;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -50,6 +54,7 @@ const BottomSheet = ({
   onVisibleHeightChange,
   label,
   canHide = true,
+  withHalf = false,
   className,
 }: BottomSheetProps) => {
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -65,9 +70,14 @@ const BottomSheet = ({
   const states: SheetState[] = [
     ...(canHide ? (["hidden"] as const) : []),
     "peek",
+    ...(hasMore && withHalf ? (["half"] as const) : []),
     ...(hasMore ? (["expanded"] as const) : []),
   ];
-  const current: SheetState = states.includes(state) ? state : "peek";
+  const current: SheetState = states.includes(state)
+    ? state
+    : state === "half" && hasMore
+      ? "expanded"
+      : "peek";
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
@@ -84,12 +94,20 @@ const BottomSheet = ({
     return () => observer.disconnect();
   }, []);
 
-  const offsetFor = (target: SheetState) =>
-    target === "expanded"
-      ? 0
-      : target === "peek"
-        ? Math.max(0, sizes.panel - sizes.peek)
-        : sizes.panel + EDGE_GAP + 40;
+  const offsetFor = (target: SheetState) => {
+    switch (target) {
+      case "expanded":
+        return 0;
+      case "half": {
+        const shown = Math.min(sizes.panel, sizes.peek + window.innerHeight * HALF_CONTENT_SHARE);
+        return Math.max(0, sizes.panel - shown);
+      }
+      case "peek":
+        return Math.max(0, sizes.panel - sizes.peek);
+      case "hidden":
+        return sizes.panel + EDGE_GAP + 40;
+    }
+  };
 
   const restingOffset = offsetFor(current);
   const offset =
@@ -109,7 +127,7 @@ const BottomSheet = ({
   // Keep keyboard focus out of parts that are off screen.
   useEffect(() => {
     if (panelRef.current) panelRef.current.inert = current === "hidden";
-    if (moreRef.current) moreRef.current.inert = current !== "expanded";
+    if (moreRef.current) moreRef.current.inert = current === "hidden" || current === "peek";
   }, [current]);
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
@@ -165,7 +183,10 @@ const BottomSheet = ({
   };
 
   const toggle = () => {
-    if (hasMore) onStateChange(current === "expanded" ? "peek" : "expanded");
+    if (!hasMore) return;
+    if (current === "peek") onStateChange(withHalf ? "half" : "expanded");
+    else if (current === "half") onStateChange("expanded");
+    else onStateChange("peek");
   };
 
   return (
@@ -180,8 +201,7 @@ const BottomSheet = ({
         role="region"
         aria-label={label}
         className={cn(
-          "pointer-events-auto mx-auto mb-3 w-[calc(100%-24px)] max-w-lg rounded-2xl bg-background",
-          "shadow-[0_8px_30px_rgba(27,23,37,0.16)]",
+          "glass pointer-events-auto mx-auto mb-3 w-[calc(100%-24px)] max-w-lg rounded-panel text-ink shadow-float",
           dragOffset === null && "transition-transform duration-300 ease-out motion-reduce:transition-none",
           sizes.panel === 0 && "invisible"
         )}
@@ -205,18 +225,23 @@ const BottomSheet = ({
             type="button"
             onClick={toggle}
             aria-label={current === "expanded" ? "Paneel inklappen" : "Paneel uitklappen"}
-            aria-expanded={hasMore ? current === "expanded" : undefined}
+            aria-expanded={hasMore ? current !== "peek" : undefined}
             className="group flex w-full justify-center pb-2 pt-2.5 focus-visible:outline-none"
           >
-            <span className="h-1.5 w-10 rounded-full bg-muted-foreground/30 group-focus-visible:ring-2 group-focus-visible:ring-[var(--brand)] group-focus-visible:ring-offset-2" />
+            <span className="h-1.5 w-10 rounded-full bg-line group-focus-visible:ring-2 group-focus-visible:ring-brand group-focus-visible:ring-offset-2" />
           </button>
           {peek}
         </div>
 
+        {/* Inset divider, so it does not run into the rounded corners. */}
+        {hasMore && <div aria-hidden="true" className="mx-5 border-t border-line" />}
         {hasMore && (
           <div
             ref={moreRef}
-            className="max-h-[50vh] overflow-y-auto overscroll-contain border-t border-border px-4 py-3"
+            className={cn(
+              "overflow-y-auto overscroll-contain px-4 py-3",
+              withHalf ? "max-h-[68vh]" : "max-h-[60vh]"
+            )}
           >
             {children}
           </div>

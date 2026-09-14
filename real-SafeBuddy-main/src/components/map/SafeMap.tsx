@@ -9,6 +9,7 @@ import Map, {
   type LineLayerSpecification,
   type MapMouseEvent,
   type MapRef,
+  type MapTouchEvent,
   type ViewStateChangeEvent,
 } from "react-map-gl/mapbox";
 import type { Map as MapboxMap } from "mapbox-gl";
@@ -28,7 +29,13 @@ import {
   usesSlots,
   type MapStyle,
 } from "./mapStyle";
-import { DestinationPin, NavigationArrow, StartPin, UserLocationDot } from "./MapPins";
+import {
+  DestinationPin,
+  NavigationArrow,
+  ReportPin,
+  StartPin,
+  UserLocationDot,
+} from "./MapPins";
 
 /**
  * The Mapbox GL map: vector basemap, GPU heatmap of reports, route line and
@@ -73,6 +80,10 @@ export interface SafeMapProps {
   routeProgress?: number;
   /** Pixels at the bottom covered by a panel. Controls stay above it. */
   bottomInset?: number;
+  /** A spot being reported, shown as a pin. */
+  pendingPoint?: LatLng | null;
+  /** Long-press (touch) or right-click (mouse) on the map. */
+  onLongPress?: (point: LatLng) => void;
   onPointClick: (report: MappedReport) => void;
   /** Called when the user stops panning or zooming. */
   onMapMove?: (viewport: MapViewport) => void;
@@ -82,12 +93,20 @@ const REPORT_SOURCE_ID = "reports";
 const HEATMAP_LAYER_ID = "reports-heat";
 const REPORT_POINT_LAYER_ID = "reports-points";
 const ROUTE_SOURCE_ID = "route";
+/** Bottom to top. */
+const ROUTE_LAYER_IDS = ["route-halo", "route-line", "route-core"];
 
 /** From here individual reports are drawn and clickable. */
 const POINT_MIN_ZOOM = 14;
 const POINT_CLICK_MIN_ZOOM = 14.5;
 /** Touch-friendly hit area around a tap, in pixels. */
 const HIT_TOLERANCE = 12;
+
+const LONG_PRESS_MS = 550;
+/** A finger may drift this many pixels and still count as holding still. */
+const LONG_PRESS_SLOP = 10;
+/** Android sends both a touch long-press and a contextmenu; handle one. */
+const LONG_PRESS_DEBOUNCE_MS = 800;
 
 const NAV_PITCH = 60;
 const NAV_ZOOM = 17.5;
@@ -102,15 +121,22 @@ const FAST_ROUTE_COLOR = "#4B4658";
 const BRIGHT_FALLBACK = "#A66CFF";
 const GLOW_FALLBACK = "#E4D2FF";
 
+// Centred on the same vertical line as the 68 px SOS button at right 10 px.
 const FAB_CLASS = cn(
-  "absolute right-4 z-[2500] flex h-11 items-center justify-center rounded-full bg-background text-foreground",
-  "shadow-[0_8px_30px_rgba(27,23,37,0.16)] transition-[bottom,background-color] duration-300 hover:bg-muted motion-reduce:transition-none",
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] focus-visible:ring-offset-2"
+  "glass absolute right-[22px] z-[2500] flex h-11 items-center justify-center rounded-full text-ink",
+  "shadow-float transition-[bottom,background-color] duration-300 hover:bg-tint motion-reduce:transition-none",
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2"
 );
 
+/**
+ * Zoomed out, thousands of reports land on the same few pixels and add up to
+ * maximum density, which painted the whole country red. Intensity and radius
+ * therefore shrink sharply below city level, and the heatmap fades out at
+ * country scale, where it says nothing useful. From zoom 11 up it is unchanged.
+ */
 const HEATMAP_PAINT: HeatmapLayerSpecification["paint"] = {
   "heatmap-weight": ["match", ["get", "severity"], "high", 1, "critical", 1, "medium", 0.6, 0.3],
-  "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 11, 1, 16, 3],
+  "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 5, 0.02, 8, 0.15, 10, 0.4, 11, 1, 16, 3],
   "heatmap-color": [
     "interpolate",
     ["linear"],
@@ -122,8 +148,8 @@ const HEATMAP_PAINT: HeatmapLayerSpecification["paint"] = {
     0.8, "rgba(239,68,68,0.85)",
     1, "rgba(220,38,38,0.9)",
   ],
-  "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 11, 18, 16, 40],
-  "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 14, 0.85, 16, 0.4],
+  "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 5, 3, 8, 8, 10, 12, 11, 18, 16, 40],
+  "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 6, 0, 8, 0.85, 14, 0.85, 16, 0.4],
 };
 
 const REPORT_POINT_PAINT: CircleLayerSpecification["paint"] = {
@@ -148,6 +174,17 @@ const ROUTE_LAYOUT: LineLayerSpecification["layout"] = {
   "line-join": "round",
 };
 
+/**
+ * On Mapbox Standard the heatmap is drawn after every flat layer, whatever
+ * its slot or order, so a flat route line disappears under red areas.
+ * Anchoring the line to the ground renders it in the 3D pass, after the
+ * heatmap. Verified in the browser: slots and moveLayer alone do not help.
+ */
+const ROUTE_LAYOUT_STANDARD: LineLayerSpecification["layout"] = {
+  ...ROUTE_LAYOUT,
+  "line-elevation-reference": "ground",
+};
+
 type ReportFeatures = FeatureCollection<Point, { i: number; severity: Severity }>;
 
 const SafeMap = ({
@@ -164,6 +201,8 @@ const SafeMap = ({
   navigationCamera = null,
   routeProgress = 0,
   bottomInset = 0,
+  pendingPoint = null,
+  onLongPress,
   onPointClick,
   onMapMove,
 }: SafeMapProps) => {
@@ -199,9 +238,12 @@ const SafeMap = ({
   const beforeId = layersReady && !slots ? loadedStyle.labelLayerId : undefined;
 
   // Where each data layer goes: a named slot on Mapbox Standard, or below the
-  // first label layer on classic styles.
+  // first label layer on classic styles. The heatmap sits a slot lower than
+  // the route, so the route is always drawn on top of it.
+  const heatmapPlacement = slots ? { slot: "bottom" } : { beforeId };
   const belowLabels = slots ? { slot: "middle" } : { beforeId };
   const onTop = slots ? { slot: "top" } : {};
+  const routeLayout = slots ? ROUTE_LAYOUT_STANDARD : ROUTE_LAYOUT;
 
   const syncStyle = useCallback(() => {
     const map = mapInstanceRef.current;
@@ -419,6 +461,17 @@ const SafeMap = ({
     [routeColors, trim]
   );
 
+  // Classic styles (satellite) have no slots: there, stack the route layers
+  // just below the labels again, which puts them above the heatmap however
+  // the layers happened to be added.
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !layersReady || slots || !routeData) return;
+    for (const id of ROUTE_LAYER_IDS) {
+      if (map.getLayer(id)) map.moveLayer(id, beforeId);
+    }
+  }, [layersReady, slots, routeData, beforeId, isSafeRoute]);
+
   // --- Interaction -------------------------------------------------------
 
   const handleClick = useCallback((event: MapMouseEvent) => {
@@ -457,6 +510,63 @@ const SafeMap = ({
       },
     });
   }, []);
+
+  // Long-press (touch) or right-click (mouse) picks a spot, e.g. to report it.
+  const onLongPressRef = useRef(onLongPress);
+  onLongPressRef.current = onLongPress;
+  const pressRef = useRef<{ timer: number; x: number; y: number } | null>(null);
+  const lastLongPressRef = useRef(0);
+
+  const cancelLongPress = useCallback(() => {
+    if (pressRef.current) window.clearTimeout(pressRef.current.timer);
+    pressRef.current = null;
+  }, []);
+
+  const fireLongPress = useCallback((lngLat: { lat: number; lng: number }) => {
+    const now = Date.now();
+    if (now - lastLongPressRef.current < LONG_PRESS_DEBOUNCE_MS) return;
+    lastLongPressRef.current = now;
+    navigator.vibrate?.(30);
+    onLongPressRef.current?.({ lat: lngLat.lat, lng: lngLat.lng });
+  }, []);
+
+  const handleTouchStart = useCallback(
+    (event: MapTouchEvent) => {
+      cancelLongPress();
+      if (!onLongPressRef.current || event.originalEvent.touches.length !== 1) return;
+      const { lngLat, point } = event;
+      pressRef.current = {
+        x: point.x,
+        y: point.y,
+        timer: window.setTimeout(() => {
+          pressRef.current = null;
+          fireLongPress(lngLat);
+        }, LONG_PRESS_MS),
+      };
+    },
+    [cancelLongPress, fireLongPress]
+  );
+
+  const handleTouchMove = useCallback(
+    (event: MapTouchEvent) => {
+      const press = pressRef.current;
+      if (press && Math.hypot(event.point.x - press.x, event.point.y - press.y) > LONG_PRESS_SLOP) {
+        cancelLongPress();
+      }
+    },
+    [cancelLongPress]
+  );
+
+  const handleContextMenu = useCallback(
+    (event: MapMouseEvent) => {
+      if (!onLongPressRef.current) return;
+      event.originalEvent.preventDefault();
+      fireLongPress(event.lngLat);
+    },
+    [fireLongPress]
+  );
+
+  useEffect(() => cancelLongPress, [cancelLongPress]);
 
   // Without a live position, the recenter button asks for one on demand.
   const [locatedPosition, setLocatedPosition] = useState<LatLng | null>(null);
@@ -503,8 +613,8 @@ const SafeMap = ({
     );
   };
 
-  // Above the SOS button, which sits 12 px above the covered area.
-  const fabBottom = bottomInset + 80;
+  // Above the 68 px SOS button, which sits 12 px above the covered area.
+  const fabBottom = bottomInset + 92;
 
   return (
     <div
@@ -527,8 +637,16 @@ const SafeMap = ({
         onLoad={handleLoad}
         onClick={handleClick}
         onMoveEnd={handleMoveEnd}
-        onDragStart={pauseFollowing}
+        onDragStart={(event) => {
+          cancelLongPress();
+          pauseFollowing(event);
+        }}
         onRotateStart={pauseFollowing}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={cancelLongPress}
+        onTouchCancel={cancelLongPress}
+        onContextMenu={handleContextMenu}
       >
         <AttributionControl compact position="bottom-left" />
 
@@ -538,7 +656,7 @@ const SafeMap = ({
               id={HEATMAP_LAYER_ID}
               type="heatmap"
               source={REPORT_SOURCE_ID}
-              {...belowLabels}
+              {...heatmapPlacement}
               paint={HEATMAP_PAINT}
             />
           </Source>
@@ -552,7 +670,7 @@ const SafeMap = ({
               type="line"
               source={ROUTE_SOURCE_ID}
               {...belowLabels}
-              layout={ROUTE_LAYOUT}
+              layout={routeLayout}
               paint={routeHaloPaint}
             />
             <Layer
@@ -560,7 +678,7 @@ const SafeMap = ({
               type="line"
               source={ROUTE_SOURCE_ID}
               {...belowLabels}
-              layout={ROUTE_LAYOUT}
+              layout={routeLayout}
               paint={routePaint}
             />
             {isSafeRoute && (
@@ -569,7 +687,7 @@ const SafeMap = ({
                 type="line"
                 source={ROUTE_SOURCE_ID}
                 {...belowLabels}
-                layout={ROUTE_LAYOUT}
+                layout={routeLayout}
                 paint={routeCorePaint}
               />
             )}
@@ -596,6 +714,11 @@ const SafeMap = ({
         {destination && (
           <Marker latitude={destination.lat} longitude={destination.lng} anchor="bottom">
             <DestinationPin />
+          </Marker>
+        )}
+        {pendingPoint && (
+          <Marker latitude={pendingPoint.lat} longitude={pendingPoint.lng} anchor="bottom">
+            <ReportPin />
           </Marker>
         )}
         {shownPosition &&

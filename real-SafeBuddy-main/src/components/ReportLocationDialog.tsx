@@ -1,13 +1,13 @@
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
+import { Loader2, Locate, MapPin } from "lucide-react";
+import { toast } from "sonner";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useLanguage } from "@/i18n/LanguageContext";
+import LocationSearchInput from "@/components/route/LocationSearchInput";
 import { supabase } from "@/integrations/supabase/client";
-import { toast } from "sonner";
-import { MapPin, Locate } from "lucide-react";
+import { REPORT_TYPE_OPTIONS } from "@/lib/reports/reportTypes";
+import { cn } from "@/lib/utils";
 
 interface ReportLocationDialogProps {
   open: boolean;
@@ -15,89 +15,34 @@ interface ReportLocationDialogProps {
   onReportSubmitted?: () => void;
 }
 
-/** One result from the Nominatim search API. */
-interface AddressSuggestion {
-  display_name: string;
-  lat: string;
-  lon: string;
-  address?: {
-    road?: string;
-    house_number?: string;
-    city?: string;
-    town?: string;
-    village?: string;
-    postcode?: string;
-  };
-}
+const SEVERITY_OPTIONS = [
+  { value: "low", label: "Laag", swatch: "bg-success" },
+  { value: "medium", label: "Matig", swatch: "bg-warning" },
+  { value: "high", label: "Hoog", swatch: "bg-destructive" },
+] as const;
+
+/** Stored values are the same English words the dialog always wrote. */
+const TIME_OPTIONS = [
+  { value: "Morning", label: "Ochtend" },
+  { value: "Afternoon", label: "Middag" },
+  { value: "Evening", label: "Avond" },
+  { value: "Night", label: "Nacht" },
+] as const;
+
+const MAX_DESCRIPTION = 500;
+
+const focusRing =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
 
 const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportLocationDialogProps) => {
-  const { t } = useLanguage();
   const [locationAddress, setLocationAddress] = useState("");
   const [coordinates, setCoordinates] = useState<{ lat: number; lon: number } | null>(null);
-  const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
   const [reportType, setReportType] = useState("");
   const [severity, setSeverity] = useState("medium");
   const [timeOfDay, setTimeOfDay] = useState("");
   const [description, setDescription] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const inputRef = useRef<HTMLDivElement>(null);
-
-  // Click outside to close suggestions
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (inputRef.current && !inputRef.current.contains(event.target as Node)) {
-        setShowSuggestions(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
-
-  // Search for address suggestions
-  useEffect(() => {
-    const timer = setTimeout(async () => {
-      if (locationAddress.length > 2) {
-        try {
-          const response = await fetch(
-            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(locationAddress + ", Netherlands")}&format=json&limit=5&addressdetails=1`
-          );
-          const data = await response.json();
-          if (data && data.length > 0) {
-            setSuggestions(data);
-            setShowSuggestions(true);
-          }
-        } catch (error) {
-          console.error("Search failed:", error);
-        }
-      }
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [locationAddress]);
-
-  const formatStreetAddress = (suggestion: AddressSuggestion): string => {
-    const addr = suggestion.address;
-    if (!addr) return suggestion.display_name;
-    
-    const parts: string[] = [];
-    if (addr.road) {
-      let street = addr.road;
-      if (addr.house_number) street += ` ${addr.house_number}`;
-      parts.push(street);
-    }
-    if (addr.city || addr.town || addr.village) {
-      parts.push(addr.city || addr.town || addr.village || "");
-    }
-    
-    return parts.length > 0 ? parts.join(", ") : suggestion.display_name;
-  };
-
-  const selectSuggestion = (suggestion: AddressSuggestion) => {
-    setLocationAddress(formatStreetAddress(suggestion));
-    // Stored so the report can be written as a PostGIS point.
-    setCoordinates({ lat: Number(suggestion.lat), lon: Number(suggestion.lon) });
-    setShowSuggestions(false);
-  };
+  const [isLocating, setIsLocating] = useState(false);
 
   const handleGetCurrentLocation = async () => {
     // Check HTTPS
@@ -113,33 +58,35 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
       return;
     }
 
+    setIsLocating(true);
     toast.loading("Locatie ophalen...");
-    
+
     // Skip permissions API on iOS
     const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-    
+
     if (!isIOS && navigator.permissions) {
       try {
         const permission = await navigator.permissions.query({ name: 'geolocation' });
         if (permission.state === 'denied') {
           toast.dismiss();
           toast.error("Locatie toegang is geblokkeerd. Ga naar je browser instellingen.");
+          setIsLocating(false);
           return;
         }
       } catch {
         // Continue anyway
       }
     }
-    
+
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         try {
           // Sla coördinaten direct op
-          setCoordinates({ 
-            lat: position.coords.latitude, 
-            lon: position.coords.longitude 
+          setCoordinates({
+            lat: position.coords.latitude,
+            lon: position.coords.longitude
           });
-          
+
           const response = await fetch(
             `https://nominatim.openstreetmap.org/reverse?lat=${position.coords.latitude}&lon=${position.coords.longitude}&format=json&addressdetails=1`
           );
@@ -162,9 +109,12 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
           console.error("Reverse geocoding failed:", error);
           toast.dismiss();
           toast.error("Kon adres niet ophalen");
+        } finally {
+          setIsLocating(false);
         }
       },
       (error) => {
+        setIsLocating(false);
         toast.dismiss();
         switch (error.code) {
           case error.PERMISSION_DENIED:
@@ -190,14 +140,14 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!locationAddress || !reportType) {
-      toast.error("Please fill in all required fields");
+      toast.error("Vul een adres in en kies wat er aan de hand is");
       return;
     }
 
     if (!coordinates) {
-      toast.error("Please select a location from the suggestions or use current location");
+      toast.error("Kies een adres uit de suggesties of gebruik je huidige locatie");
       return;
     }
 
@@ -205,9 +155,9 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
 
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      
+
       if (!user) {
-        toast.error("You must be logged in to submit a report");
+        toast.error("Log in om een melding te plaatsen");
         return;
       }
 
@@ -226,12 +176,12 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
 
       if (error) throw error;
 
-      toast.success("Safety report submitted successfully!");
+      toast.success("Melding geplaatst", { description: "Dank je. Je melding is nu zichtbaar." });
       onReportSubmitted?.();
-      
+
       // Emit event so Profile can update report count
       window.dispatchEvent(new Event('reportSubmitted'));
-      
+
       setLocationAddress("");
       setCoordinates(null);
       setReportType("");
@@ -241,7 +191,7 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
       onOpenChange(false);
     } catch (error) {
       console.error("Error submitting report:", error);
-      toast.error("Failed to submit report");
+      toast.error("Melding plaatsen mislukt. Probeer het opnieuw.");
     } finally {
       setIsSubmitting(false);
     }
@@ -249,114 +199,189 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader className="bg-gradient-to-r from-primary to-primary-light p-4 -m-6 mb-4 rounded-t-lg">
-          <div className="flex items-center gap-2 text-primary-foreground">
-            <MapPin className="h-5 w-5" />
-            <DialogTitle className="text-primary-foreground">{t("reportLocation")}</DialogTitle>
-          </div>
+      <DialogContent className="max-h-[92vh] gap-0 overflow-y-auto rounded-2xl p-0 sm:max-w-md">
+        <DialogHeader className="gradient-header space-y-1 rounded-t-2xl p-5 text-left">
+          <DialogTitle className="text-lg text-primary-foreground">Nieuwe melding</DialogTitle>
+          <p className="text-sm text-primary-foreground/80">
+            Help anderen door een onveilige plek te melden.
+          </p>
         </DialogHeader>
-        
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-2">
-            <label className="text-sm font-medium">{t("streetAddress")} *</label>
-            <div className="relative" ref={inputRef}>
-              <div className="flex gap-2">
-                <Input
-                  placeholder={t("enterStreetAddress")}
-                  value={locationAddress}
-                  onChange={(e) => setLocationAddress(e.target.value)}
-                  onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
-                  required
-                  className="flex-1"
-                />
-                <Button type="button" size="sm" variant="outline" onClick={handleGetCurrentLocation} className="flex-shrink-0">
+
+        <form onSubmit={handleSubmit} className="space-y-6 p-5">
+          <section className="space-y-2">
+            <p id="report-location-label" className="text-sm font-semibold">
+              Waar is het?
+            </p>
+            <LocationSearchInput
+              value={locationAddress}
+              onValueChange={setLocationAddress}
+              onSelect={(suggestion) => {
+                setLocationAddress(suggestion.label);
+                // Stored so the report can be written as a PostGIS point.
+                setCoordinates({ lat: suggestion.lat, lon: suggestion.lng });
+              }}
+              placeholder="Zoek een adres of straat"
+              ariaLabel="Adres"
+              inputClassName="h-11 rounded-xl border border-input bg-background pr-3"
+            />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void handleGetCurrentLocation()}
+                disabled={isLocating}
+                className="rounded-full"
+              >
+                {isLocating ? (
+                  <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+                ) : (
                   <Locate className="h-4 w-4" />
-                </Button>
-              </div>
-              
-              {showSuggestions && suggestions.length > 0 && (
-                <div className="absolute top-full left-0 right-0 mt-1 bg-background border border-border rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">
-                  {suggestions.map((suggestion, index) => (
-                    <button
-                      key={index}
-                      type="button"
-                      onClick={() => selectSuggestion(suggestion)}
-                      className="w-full text-left px-3 py-2 hover:bg-muted text-sm transition-colors border-b border-border last:border-0"
-                    >
-                      <span className="font-medium">{formatStreetAddress(suggestion)}</span>
-                    </button>
-                  ))}
-                </div>
+                )}
+                Gebruik huidige locatie
+              </Button>
+              {coordinates && (
+                <span className="inline-flex items-center gap-1 text-xs font-medium text-success">
+                  <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
+                  Locatie vastgelegd
+                </span>
               )}
             </div>
-            <p className="text-xs text-muted-foreground">{t("enterExactStreetName")}</p>
-          </div>
+          </section>
 
-          <div className="space-y-2">
-            <label className="text-sm font-medium">{t("reportType")} *</label>
-            <Select value={reportType} onValueChange={setReportType}>
-              <SelectTrigger>
-                <SelectValue placeholder={t("selectType")} />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="Poor Lighting">{t("poorLighting")}</SelectItem>
-                <SelectItem value="Harassment">{t("harassment")}</SelectItem>
-                <SelectItem value="Theft">{t("theft")}</SelectItem>
-                <SelectItem value="Suspicious Activity">{t("suspiciousActivity")}</SelectItem>
-                <SelectItem value="Traffic Risk">{t("trafficRisk")}</SelectItem>
-                <SelectItem value="Disturbance">{t("disturbance")}</SelectItem>
-                <SelectItem value="Unsafe Area">{t("unsafeArea")}</SelectItem>
-                <SelectItem value="Other">{t("other")}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+          <section>
+            <p id="report-type-label" className="mb-2 text-sm font-semibold">
+              Wat is er aan de hand?
+            </p>
+            <div
+              role="radiogroup"
+              aria-labelledby="report-type-label"
+              className="grid grid-cols-3 gap-2 sm:grid-cols-4"
+            >
+              {REPORT_TYPE_OPTIONS.map(({ value, label, Icon }) => {
+                const selected = reportType === value;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => setReportType(value)}
+                    className={cn(
+                      "flex flex-col items-center gap-1.5 rounded-xl border px-1 py-3 text-center text-[11px] font-medium leading-tight transition-colors motion-reduce:transition-none",
+                      selected
+                        ? "border-primary bg-primary-tint text-primary"
+                        : "border-border bg-card text-foreground hover:bg-muted",
+                      focusRing
+                    )}
+                  >
+                    <Icon className="h-5 w-5" aria-hidden="true" />
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </section>
 
-          <div className="space-y-2">
-            <label className="text-sm font-medium">{t("severity")}</label>
-            <Select value={severity} onValueChange={setSeverity}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="low">{t("lowRisk")}</SelectItem>
-                <SelectItem value="medium">{t("mediumRisk")}</SelectItem>
-                <SelectItem value="high">{t("highRisk")}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+          <section>
+            <p id="report-severity-label" className="mb-2 text-sm font-semibold">
+              Hoe ernstig?
+            </p>
+            <div
+              role="radiogroup"
+              aria-labelledby="report-severity-label"
+              className="grid grid-cols-3 gap-2"
+            >
+              {SEVERITY_OPTIONS.map(({ value, label, swatch }) => {
+                const selected = severity === value;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => setSeverity(value)}
+                    className={cn(
+                      "flex h-11 items-center justify-center gap-2 rounded-xl border text-sm font-semibold transition-colors motion-reduce:transition-none",
+                      selected
+                        ? "border-primary bg-primary-tint text-foreground"
+                        : "border-border bg-card text-foreground hover:bg-muted",
+                      focusRing
+                    )}
+                  >
+                    <span aria-hidden="true" className={cn("h-3.5 w-3.5 rounded-full", swatch)} />
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </section>
 
-          <div className="space-y-2">
-            <label className="text-sm font-medium">{t("timeOfDay")}</label>
-            <Select value={timeOfDay} onValueChange={setTimeOfDay}>
-              <SelectTrigger>
-                <SelectValue placeholder={t("selectTime")} />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="Morning">{t("morning")}</SelectItem>
-                <SelectItem value="Afternoon">{t("afternoon")}</SelectItem>
-                <SelectItem value="Evening">{t("evening")}</SelectItem>
-                <SelectItem value="Night">{t("night")}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+          <section>
+            <p id="report-time-label" className="mb-2 text-sm font-semibold">
+              Wanneer speelt het? <span className="font-normal text-muted-foreground">(optioneel)</span>
+            </p>
+            <div role="radiogroup" aria-labelledby="report-time-label" className="flex flex-wrap gap-2">
+              {TIME_OPTIONS.map(({ value, label }) => {
+                const selected = timeOfDay === value;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => setTimeOfDay(selected ? "" : value)}
+                    className={cn(
+                      "rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors motion-reduce:transition-none",
+                      selected
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border bg-card text-foreground hover:bg-muted",
+                      focusRing
+                    )}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </section>
 
-          <div className="space-y-2">
-            <label className="text-sm font-medium">{t("descriptionOptional")}</label>
+          <section>
+            <div className="mb-2 flex items-baseline justify-between">
+              <label htmlFor="report-description" className="text-sm font-semibold">
+                Toelichting <span className="font-normal text-muted-foreground">(optioneel)</span>
+              </label>
+              <span className="text-xs tabular-nums text-muted-foreground" aria-live="polite">
+                {description.length}/{MAX_DESCRIPTION}
+              </span>
+            </div>
             <Textarea
-              placeholder={t("shareDetails")}
+              id="report-description"
+              placeholder="Wat moeten anderen weten?"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
+              maxLength={MAX_DESCRIPTION}
               rows={3}
+              className="rounded-xl"
             />
-          </div>
+          </section>
 
           <div className="flex gap-3">
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} className="flex-1">
-              {t("cancel")}
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              className="h-12 rounded-xl"
+            >
+              Annuleren
             </Button>
-            <Button type="submit" disabled={isSubmitting} className="flex-1 gradient-primary">
-              {isSubmitting ? t("submitting") : t("submitReport")}
+            <Button
+              type="submit"
+              disabled={isSubmitting}
+              className="h-12 flex-1 rounded-xl text-base font-semibold"
+            >
+              {isSubmitting && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />}
+              {isSubmitting ? "Bezig met plaatsen…" : "Melding plaatsen"}
             </Button>
           </div>
         </form>

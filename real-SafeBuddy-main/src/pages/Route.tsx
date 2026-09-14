@@ -1,28 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Bike,
-  Car,
-  ChevronUp,
-  Clock,
-  Filter,
-  Footprints,
-  Locate,
-  Map as MapIcon,
-  Moon,
-  Route as RouteIcon,
-  Satellite,
-  Sun,
-} from "lucide-react";
+import { AlertTriangle, ChevronUp, Clock, X } from "lucide-react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import BottomNav from "@/components/BottomNav";
 import PanicButton from "@/components/PanicButton";
 import SafeMap, { type MapStyle } from "@/components/map/SafeMap";
 import BottomSheet, { type SheetState } from "@/components/route/BottomSheet";
-import LocationSearchInput from "@/components/route/LocationSearchInput";
+import FloatingSearch from "@/components/route/FloatingSearch";
+import { HomeSheetPeek, NearbyReports } from "@/components/route/HomeSheetContent";
+import MapTools from "@/components/route/MapTools";
 import NavigationPanel from "@/components/route/NavigationPanel";
 import ReportCard from "@/components/route/ReportCard";
+import ReportHazardForm, { type HazardSubmission } from "@/components/route/ReportHazardForm";
+import RouteModeToggle, { type RouteMode } from "@/components/route/RouteModeToggle";
 import RouteWarningsDialog from "@/components/route/RouteWarningsDialog";
 import { NavigationPeek, RouteOverviewPeek } from "@/components/route/RouteSheetContent";
 import SafetyBreakdown from "@/components/route/SafetyBreakdown";
@@ -31,50 +20,63 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useNavigation } from "@/hooks/useNavigation";
 import { useNavigationView } from "@/hooks/useNavigationView";
 import { useReports } from "@/hooks/useReports";
+import { readSafetyPreferences } from "@/hooks/useSafetyPreferences";
 import { useTripShare } from "@/hooks/useTripShare";
 import { useLanguage } from "@/i18n/LanguageContext";
 import type { LatLng, NamedLocation } from "@/lib/geo";
-import { GeolocationUnavailableError, getCurrentLocation } from "@/lib/geocoding";
+import {
+  GeolocationUnavailableError,
+  getCurrentLocation,
+  type PlaceSuggestion,
+} from "@/lib/geocoding";
 import { DEFAULT_FILTERS, TIME_FILTERS, applyFilters } from "@/lib/reports/filters";
-import { deleteSafetyReport, toggleReportLike } from "@/lib/reports/mutations";
-import { countBySeverity, type SafetyReport } from "@/lib/reports/types";
+import { createSafetyReport, deleteSafetyReport, toggleReportLike } from "@/lib/reports/mutations";
+import { nearestReports } from "@/lib/reports/nearby";
+import { countBySeverity, type MappedReport, type SafetyReport } from "@/lib/reports/types";
 import {
   RoutingError,
   planRoutes,
   rescoreWithLighting,
-  type PlannedRoute,
+  type RouteOptions,
   type TravelMode,
 } from "@/lib/routing/directions";
 import { explainRoute } from "@/lib/safety/explain";
 import { fetchLightingCoverage } from "@/lib/safety/lighting";
+import { cn } from "@/lib/utils";
 
 /**
- * The map screen: plan a route, see reported problem spots, and navigate.
+ * The map screen: plan a route, see reported problem spots, report one, and
+ * navigate.
  *
- * This page wires things together. The map itself lives in `SafeMap`,
- * route planning in `lib/routing`, and report loading in `useReports`.
+ * The map is the whole interface; everything else floats over it. This page
+ * wires things together. The map itself lives in `SafeMap`, route planning in
+ * `lib/routing`, and report loading in `useReports`.
  */
 
 /** Amsterdam, used until the user's own position or a search moves the map. */
 const DEFAULT_CENTER: [number, number] = [52.3676, 4.9041];
 const DEFAULT_ZOOM = 12;
 const FOCUS_ZOOM = 15;
+const REPORT_ZOOM = 17;
 
 /** Height reserved for the bottom navigation bar. */
 const BOTTOM_NAV_SPACE = 80;
 /** Gap between floating buttons and whatever is below them. */
 const FLOATING_GAP = 12;
 
-const TRAVEL_MODES: { value: TravelMode; Icon: typeof Footprints }[] = [
-  { value: "foot", Icon: Footprints },
-  { value: "bike", Icon: Bike },
-  { value: "car", Icon: Car },
-];
+const NEARBY_RADIUS_KM = 1;
+const NEARBY_LIMIT = 25;
+
+/** What the bottom sheet is showing. Earlier entries take priority. */
+type SheetMode = "navigation" | "compose" | "detail" | "route" | "home";
+
+const focusRing =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2";
 
 const Route = () => {
   const { t } = useLanguage();
   const { user } = useCurrentUser();
-  const { mapped, patchReport, removeReport } = useReports();
+  const { mapped, patchReport, removeReport, addReport } = useReports();
 
   const [startText, setStartText] = useState("");
   const [destinationText, setDestinationText] = useState("");
@@ -83,7 +85,8 @@ const Route = () => {
 
   const [center, setCenter] = useState<[number, number]>(DEFAULT_CENTER);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
-  // Where the user has panned to, used to bias address suggestions nearby.
+  // Where the user has panned to: biases address suggestions and decides which
+  // reports count as nearby.
   const [viewCenter, setViewCenter] = useState<LatLng>({
     lat: DEFAULT_CENTER[0],
     lng: DEFAULT_CENTER[1],
@@ -96,16 +99,34 @@ const Route = () => {
   const [selectedReport, setSelectedReport] = useState<SafetyReport | null>(null);
 
   const [travelMode, setTravelMode] = useState<TravelMode>("foot");
-  const [route, setRoute] = useState<PlannedRoute | null>(null);
+  const [routeOptions, setRouteOptions] = useState<RouteOptions | null>(null);
+  // Starts on the default chosen in the profile's safety preferences.
+  const [routeMode, setRouteMode] = useState<RouteMode>(
+    () => readSafetyPreferences().defaultRouteMode
+  );
   const [isPlanning, setIsPlanning] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
   const [showWarnings, setShowWarnings] = useState(false);
 
+  const [isComposing, setIsComposing] = useState(false);
+  const [composePoint, setComposePoint] = useState<LatLng | null>(null);
+  const [isLocatingReport, setIsLocatingReport] = useState(false);
+  const [showSharePanel, setShowSharePanel] = useState(false);
+
   const [sheetState, setSheetState] = useState<SheetState>("peek");
   const [sheetInset, setSheetInset] = useState(0);
 
-  // Identifies the most recent plan, so a slow lighting response cannot
-  // overwrite the results of a newer search.
+  // The planner returns both routes; the toggle only chooses which one shows.
+  const route = routeOptions
+    ? routeMode === "safe"
+      ? routeOptions.safest
+      : routeOptions.fastest
+    : null;
+  const routeModeRef = useRef(routeMode);
+  routeModeRef.current = routeMode;
+
+  // Identifies the most recent plan, so a slow response cannot overwrite the
+  // results of a newer search.
   const planIdRef = useRef(0);
 
   // The map follows the user itself while navigating.
@@ -123,10 +144,20 @@ const Route = () => {
 
   const visibleReports = useMemo(() => applyFilters(mapped, filters), [mapped, filters]);
   const counts = useMemo(() => countBySeverity(visibleReports), [visibleReports]);
+  const nearby = useMemo(
+    () => nearestReports(visibleReports, viewCenter, NEARBY_RADIUS_KM, NEARBY_LIMIT),
+    [visibleReports, viewCenter]
+  );
+
+  // --- Route planning ------------------------------------------------------
 
   const planRoute = useCallback(
-    async (mode: TravelMode) => {
-      if (!start || !destination) {
+    async (
+      mode: TravelMode,
+      from: NamedLocation | null = start,
+      to: NamedLocation | null = destination
+    ) => {
+      if (!from || !to) {
         toast.error("Kies eerst een start en een bestemming uit de suggesties");
         return;
       }
@@ -136,18 +167,19 @@ const Route = () => {
       setRouteError(null);
 
       try {
-        const { safest } = await planRoutes(start, destination, mode, mapped);
+        const options = await planRoutes(from, to, mode, mapped);
         if (planIdRef.current !== planId) return;
 
-        setRoute(safest);
+        setRouteOptions(options);
         setSheetState("peek");
-        setShowWarnings(safest.safety.warnings.length > 0);
+        const shown = routeModeRef.current === "safe" ? options.safest : options.fastest;
+        setShowWarnings(shown.safety.warnings.length > 0);
         toast.success("Route berekend");
 
         // Lighting is deliberately not awaited: OpenStreetMap can take many
         // seconds, and the route is more useful on screen now than a few
         // seconds later with one more factor folded in.
-        void enrichWithLighting(safest, planId);
+        void enrichWithLighting(options, planId);
       } catch (error) {
         if (planIdRef.current !== planId) return;
         const message =
@@ -163,15 +195,30 @@ const Route = () => {
   );
 
   /**
-   * Fetch street lighting in the background and re-score once it lands.
-   * A failure here is normal and simply leaves lighting out of the score.
+   * Fetch street lighting for both routes in the background and re-score once
+   * it lands. A failure here is normal and simply leaves lighting out.
    */
   const enrichWithLighting = useCallback(
-    async (planned: PlannedRoute, planId: number) => {
-      const lighting = await fetchLightingCoverage(planned.coordinates);
-      if (!lighting || planIdRef.current !== planId) return;
+    async (options: RouteOptions, planId: number) => {
+      const sameRoute = options.safest === options.fastest;
+      const [safeLighting, fastLighting] = await Promise.all([
+        fetchLightingCoverage(options.safest.coordinates),
+        sameRoute ? Promise.resolve(null) : fetchLightingCoverage(options.fastest.coordinates),
+      ]);
+      if (planIdRef.current !== planId) return;
 
-      setRoute(rescoreWithLighting(planned, mapped, lighting));
+      const safest = safeLighting
+        ? rescoreWithLighting(options.safest, mapped, safeLighting)
+        : options.safest;
+      const fastest = sameRoute
+        ? safest
+        : fastLighting
+          ? rescoreWithLighting(options.fastest, mapped, fastLighting)
+          : options.fastest;
+
+      if (safest !== options.safest || fastest !== options.fastest) {
+        setRouteOptions({ safest, fastest });
+      }
     },
     [mapped]
   );
@@ -191,7 +238,7 @@ const Route = () => {
   );
 
   // Recalculate when the travel mode changes, but only once a route exists.
-  const hasRoute = route !== null;
+  const hasRoute = routeOptions !== null;
   useEffect(() => {
     if (hasRoute) void planRoute(travelMode);
     // `planRoute` changes with its inputs; re-running on those would replan
@@ -199,18 +246,78 @@ const Route = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [travelMode]);
 
-  const useMyLocation = async () => {
+  const chooseDestination = async (suggestion: PlaceSuggestion) => {
+    const target = { lat: suggestion.lat, lng: suggestion.lng, name: suggestion.label };
+    setDestination(target);
+    setDestinationText(suggestion.label);
+    setCenter([target.lat, target.lng]);
+    setZoom(FOCUS_ZOOM);
+
+    // Without a chosen start, "Van: Mijn locatie" means the user's position.
+    let from = start;
+    if (!from) {
+      const toastId = toast.loading("Locatie ophalen...");
+      try {
+        from = await getCurrentLocation();
+        setStart(from);
+        setStartText(from.name);
+        toast.dismiss(toastId);
+      } catch (error) {
+        toast.error(describeLocationError(error), {
+          id: toastId,
+          description: "Kies zelf een startpunt bij 'Van'.",
+        });
+        return;
+      }
+    }
+
+    void planRoute(travelMode, from, target);
+  };
+
+  const chooseStart = (suggestion: PlaceSuggestion) => {
+    const from = { lat: suggestion.lat, lng: suggestion.lng, name: suggestion.label };
+    setStart(from);
+    setStartText(suggestion.label);
+    if (destination) {
+      void planRoute(travelMode, from, destination);
+    } else {
+      setCenter([from.lat, from.lng]);
+      setZoom(FOCUS_ZOOM);
+    }
+  };
+
+  const locateStart = async () => {
     const toastId = toast.loading("Locatie ophalen...");
     try {
       const location = await getCurrentLocation();
       setStart(location);
       setStartText(location.name);
-      setCenter([location.lat, location.lng]);
-      setZoom(FOCUS_ZOOM);
       toast.success("Locatie gevonden", { id: toastId });
+      if (destination) void planRoute(travelMode, location, destination);
+      else {
+        setCenter([location.lat, location.lng]);
+        setZoom(FOCUS_ZOOM);
+      }
     } catch (error) {
       toast.error(describeLocationError(error), { id: toastId });
     }
+  };
+
+  const clearDestination = () => {
+    planIdRef.current++;
+    setIsPlanning(false);
+    setDestination(null);
+    setDestinationText("");
+    setRouteOptions(null);
+    setRouteError(null);
+  };
+
+  // --- Reports -------------------------------------------------------------
+
+  const focusReport = (item: MappedReport) => {
+    setSelectedReport(item.report);
+    setCenter([item.lat, item.lng]);
+    setZoom(REPORT_ZOOM);
   };
 
   const handleLike = async (report: SafetyReport) => {
@@ -247,6 +354,63 @@ const Route = () => {
       );
     }
   };
+
+  const startCompose = (point: LatLng | null = null) => {
+    setSelectedReport(null);
+    setShowSharePanel(false);
+    setComposePoint(point);
+    setIsComposing(true);
+  };
+
+  const cancelCompose = () => {
+    setIsComposing(false);
+    setComposePoint(null);
+  };
+
+  // Without a long-press, the report goes where the map is centred.
+  const reportPoint = composePoint ?? viewCenter;
+
+  const locateReport = async () => {
+    setIsLocatingReport(true);
+    try {
+      const location = await getCurrentLocation();
+      setComposePoint({ lat: location.lat, lng: location.lng });
+      setCenter([location.lat, location.lng]);
+      setZoom(REPORT_ZOOM);
+    } catch (error) {
+      toast.error(describeLocationError(error));
+    } finally {
+      setIsLocatingReport(false);
+    }
+  };
+
+  const submitHazard = async (submission: HazardSubmission): Promise<boolean> => {
+    try {
+      const report = await createSafetyReport({
+        point: submission.point,
+        address: submission.address,
+        reportType: submission.reportType,
+        severity: submission.severity,
+        description: submission.description,
+      });
+      addReport(report);
+      // Profile listens for this to update its report count.
+      window.dispatchEvent(new Event("reportSubmitted"));
+      setIsComposing(false);
+      setComposePoint(null);
+      toast.success("Gevaar gemeld", { description: "Dank je. Je melding staat nu op de kaart." });
+      return true;
+    } catch (error) {
+      toast.error(
+        error instanceof Error && error.message === "not-authenticated"
+          ? "Log in om een melding te maken"
+          : "Melding opslaan mislukt. Probeer het opnieuw."
+      );
+      return false;
+    }
+  };
+
+  // --- Trip sharing --------------------------------------------------------
 
   const handleStartSharing = async (expectedArrival: Date | null, contactIds: string[]) => {
     try {
@@ -297,11 +461,12 @@ const Route = () => {
     }
   };
 
+  // --- Navigation ----------------------------------------------------------
+
   const startNavigation = () => {
     if (!route) return;
     try {
       navigation.start(route);
-      setSheetState("peek");
       toast.success(`Navigatie gestart naar ${destination?.name ?? "bestemming"}`);
     } catch {
       toast.error("GPS is niet beschikbaar op dit apparaat");
@@ -310,16 +475,33 @@ const Route = () => {
 
   const stopNavigation = () => {
     navigation.stop();
-    setSheetState("peek");
     toast.info("Navigatie gestopt");
   };
 
-  // Everything floating is positioned from the bottom of the visible map.
-  const baseOffset = isNavigating ? 0 : BOTTOM_NAV_SPACE;
-  const mapInset = route ? sheetInset : 0;
-  const floatingBottom = baseOffset + mapInset + FLOATING_GAP;
+  // --- Bottom sheet --------------------------------------------------------
 
-  const sharePanel = (embedded: boolean) => (
+  const sheetMode: SheetMode = isNavigating
+    ? "navigation"
+    : isComposing
+      ? "compose"
+      : selectedReport
+        ? "detail"
+        : route
+          ? "route"
+          : "home";
+
+  // Each mode opens at its natural height.
+  useEffect(() => {
+    setSheetState(sheetMode === "compose" ? "expanded" : "peek");
+  }, [sheetMode]);
+
+  const handleSheetStateChange = (next: SheetState) => {
+    if (next === "hidden" && sheetMode === "compose") return cancelCompose();
+    if (next === "hidden" && sheetMode === "detail") return setSelectedReport(null);
+    setSheetState(next);
+  };
+
+  const sharePanel = (
     <ShareTripPanel
       trip={tripShare.trip}
       isBusy={tripShare.isBusy}
@@ -328,9 +510,152 @@ const Route = () => {
       onStop={handleStopSharing}
       onCheckIn={handleCheckIn}
       onExtend={handleExtend}
-      embedded={embedded}
+      embedded
     />
   );
+
+  const sheet = ((): {
+    label: string;
+    canHide: boolean;
+    withHalf?: boolean;
+    peek: React.ReactNode;
+    content?: React.ReactNode;
+  } | null => {
+    switch (sheetMode) {
+      case "navigation":
+        if (!route || !navView) return null;
+        return {
+          label: "Navigatie",
+          canHide: false,
+          peek: (
+            <NavigationPeek
+              arrival={navView.arrival}
+              remainingSeconds={navView.remainingSeconds}
+              remainingMeters={navView.remainingMeters}
+              score={route.safety.score}
+              onStop={stopNavigation}
+            />
+          ),
+          content: (
+            <div className="space-y-4">
+              {sharePanel}
+              <SafetyBreakdown safety={route.safety} explanation={explanation} embedded />
+            </div>
+          ),
+        };
+
+      case "compose":
+        return {
+          label: "Gevaar melden",
+          canHide: true,
+          peek: (
+            <div className="flex items-center gap-3 px-4 pb-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-tint text-brand">
+                <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-base font-semibold text-ink">Meld een gevaarlijke plek</p>
+                <p className="truncate text-xs text-ink-soft">
+                  Verschuif de kaart of houd een plek ingedrukt
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={cancelCompose}
+                aria-label="Melding annuleren"
+                className={cn(
+                  "flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-tint text-ink-soft hover:text-ink",
+                  focusRing
+                )}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          ),
+          content: (
+            <ReportHazardForm
+              point={reportPoint}
+              onUseMyLocation={() => void locateReport()}
+              isLocating={isLocatingReport}
+              onSubmit={submitHazard}
+              onCancel={cancelCompose}
+              isLoggedIn={Boolean(user)}
+            />
+          ),
+        };
+
+      case "detail":
+        if (!selectedReport) return null;
+        return {
+          label: "Melding",
+          canHide: true,
+          peek: (
+            <div className="px-4 pb-4">
+              <ReportCard
+                report={selectedReport}
+                currentUserId={user?.id ?? null}
+                onClose={() => setSelectedReport(null)}
+                onLike={handleLike}
+                onDelete={handleDelete}
+                embedded
+              />
+            </div>
+          ),
+        };
+
+      case "route":
+        if (!route) return null;
+        return {
+          label: "Route",
+          canHide: true,
+          peek: (
+            <RouteOverviewPeek
+              route={route}
+              onStart={startNavigation}
+              onHide={() => setSheetState("hidden")}
+            />
+          ),
+          content: (
+            <div className="space-y-4">
+              <SafetyBreakdown safety={route.safety} explanation={explanation} embedded />
+              {sharePanel}
+            </div>
+          ),
+        };
+
+      case "home":
+        return {
+          label: "SafeBuddy",
+          canHide: false,
+          withHalf: true,
+          peek: (
+            <HomeSheetPeek
+              onReport={() => startCompose()}
+              onShare={() => {
+                setShowSharePanel(true);
+                setSheetState("half");
+              }}
+              isSharing={tripShare.isSharing}
+            />
+          ),
+          content: (
+            <div className="space-y-4">
+              {(showSharePanel || tripShare.isSharing) && sharePanel}
+              <NearbyReports
+                items={nearby}
+                radiusLabel={`${NEARBY_RADIUS_KM} km`}
+                onSelect={focusReport}
+              />
+            </div>
+          ),
+        };
+    }
+  })();
+
+  // Everything floating is positioned from the bottom of the visible map.
+  const baseOffset = isNavigating ? 0 : BOTTOM_NAV_SPACE;
+  const mapInset = sheet ? sheetInset : 0;
+  const floatingBottom = baseOffset + mapInset + FLOATING_GAP;
 
   return (
     <div className="relative flex min-h-screen flex-col bg-background">
@@ -341,7 +666,7 @@ const Route = () => {
           start={start}
           destination={destination}
           routeCoordinates={route?.coordinates ?? null}
-          routeKind="safe"
+          routeKind={routeMode}
           userPosition={navigation.position}
           center={center}
           zoom={zoom}
@@ -352,174 +677,115 @@ const Route = () => {
           }
           routeProgress={navView?.progress ?? 0}
           bottomInset={mapInset}
-          onPointClick={(item) => setSelectedReport(item.report)}
+          pendingPoint={isComposing ? reportPoint : null}
+          onLongPress={isNavigating ? undefined : (point) => startCompose(point)}
+          onPointClick={(item) => {
+            if (isComposing) return;
+            setSelectedReport(item.report);
+          }}
           onMapMove={(viewport) => setViewCenter(viewport.center)}
         />
       </div>
 
-      {/* Search and controls, floating over the map. Hidden while navigating. */}
-      {!isNavigating && (
-        <div className="pointer-events-none absolute left-4 right-4 top-4 z-[1000]">
-          <Card className="pointer-events-auto border-0 bg-background/95 shadow-lg backdrop-blur-sm">
-            <CardContent className="space-y-2 p-3">
-              <div className="flex items-center gap-2">
-                <LocationSearchInput
-                  value={startText}
-                  onValueChange={setStartText}
-                  onSelect={(suggestion) => {
-                    setStart({ lat: suggestion.lat, lng: suggestion.lng, name: suggestion.label });
-                    setStartText(suggestion.label);
-                    setCenter([suggestion.lat, suggestion.lng]);
-                    setZoom(FOCUS_ZOOM);
-                  }}
-                  placeholder={t("enterStartLocation")}
-                  near={viewCenter}
-                  action={
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={useMyLocation}
-                      aria-label={t("myLocation")}
-                      className="absolute right-1 top-1 h-8 w-8 p-0"
-                    >
-                      <Locate className="h-4 w-4" />
-                    </Button>
-                  }
-                />
+      {/* Search, route mode and map tools, floating over the map. */}
+      {!isNavigating && !isComposing && (
+        <div className="pointer-events-none absolute inset-x-3 top-3 z-[1000] flex flex-col gap-2 sm:right-auto sm:w-[26rem]">
+          <FloatingSearch
+            destinationText={destinationText}
+            onDestinationTextChange={setDestinationText}
+            onDestinationSelect={(suggestion) => void chooseDestination(suggestion)}
+            onClearDestination={clearDestination}
+            startText={startText}
+            onStartTextChange={setStartText}
+            onStartSelect={chooseStart}
+            startLabel={start?.name ?? null}
+            onUseMyLocation={() => void locateStart()}
+            travelMode={travelMode}
+            onTravelModeChange={setTravelMode}
+            isPlanning={isPlanning}
+            canPlan={Boolean(start && destination && !routeOptions)}
+            onPlan={() => void planRoute(travelMode)}
+            near={viewCenter}
+          />
 
-                <LocationSearchInput
-                  value={destinationText}
-                  onValueChange={setDestinationText}
-                  onSelect={(suggestion) => {
-                    setDestination({
-                      lat: suggestion.lat,
-                      lng: suggestion.lng,
-                      name: suggestion.label,
-                    });
-                    setDestinationText(suggestion.label);
-                    setCenter([suggestion.lat, suggestion.lng]);
-                    setZoom(FOCUS_ZOOM);
-                  }}
-                  placeholder={t("enterEndLocation")}
-                  near={viewCenter}
-                />
-
-                <Button
-                  size="icon"
-                  onClick={() => void planRoute(travelMode)}
-                  disabled={isPlanning}
-                  aria-label={t("findRoute")}
-                  className="h-10 w-10 shrink-0"
-                >
-                  <RouteIcon className="h-4 w-4" />
-                </Button>
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div className="flex gap-1">
-                  {TRAVEL_MODES.map(({ value, Icon }) => (
-                    <Button
-                      key={value}
-                      size="sm"
-                      variant={travelMode === value ? "default" : "ghost"}
-                      onClick={() => setTravelMode(value)}
-                      className="h-8 px-2"
-                    >
-                      <Icon className="h-4 w-4" />
-                    </Button>
-                  ))}
-                </div>
-
-                <div className="flex gap-1">
-                  <Button
-                    size="sm"
-                    variant={showFilters ? "default" : "ghost"}
-                    onClick={() => setShowFilters((open) => !open)}
-                    className="h-8 w-8 p-0"
-                  >
-                    <Filter className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setIsDark((dark) => !dark)}
-                    disabled={mapStyle === "satellite"}
-                    className="h-8 w-8 p-0"
-                  >
-                    {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={mapStyle === "satellite" ? "default" : "ghost"}
-                    onClick={() =>
-                      setMapStyle((style) => (style === "satellite" ? "navigation" : "satellite"))
-                    }
-                    className="h-8 w-8 p-0"
-                  >
-                    {mapStyle === "satellite" ? (
-                      <MapIcon className="h-4 w-4" />
-                    ) : (
-                      <Satellite className="h-4 w-4" />
-                    )}
-                  </Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+          <div className="flex items-center justify-between gap-2">
+            <RouteModeToggle
+              value={routeMode}
+              onChange={setRouteMode}
+              safeDetail={routeOptions?.safest.durationLabel}
+              fastDetail={routeOptions?.fastest.durationLabel}
+            />
+            <MapTools
+              filtersOpen={showFilters}
+              onToggleFilters={() => setShowFilters((open) => !open)}
+              isDark={isDark}
+              onToggleDark={() => setIsDark((dark) => !dark)}
+              mapStyle={mapStyle}
+              onToggleStyle={() =>
+                setMapStyle((style) => (style === "satellite" ? "navigation" : "satellite"))
+              }
+            />
+          </div>
 
           {showFilters && (
-            <Card className="pointer-events-auto mt-2 border-0 bg-background/95 shadow-lg backdrop-blur-sm">
-              <CardContent className="p-3">
-                <div className="mb-2 flex items-center gap-2">
-                  <Clock className="h-3 w-3 text-primary" />
-                  <span className="text-xs font-medium text-muted-foreground">Periode</span>
+            <div className="glass pointer-events-auto rounded-panel p-3 text-ink shadow-float">
+              <div className="mb-2 flex items-center gap-2">
+                <Clock className="h-3.5 w-3.5 text-brand" aria-hidden="true" />
+                <span className="text-xs font-medium text-ink-soft">Periode</span>
+              </div>
+              <div role="radiogroup" aria-label="Periode" className="mb-3 grid grid-cols-5 gap-1.5">
+                {TIME_FILTERS.map(({ value, label }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={filters.time === value}
+                    onClick={() => setFilters((current) => ({ ...current, time: value }))}
+                    className={cn(
+                      "rounded-full px-2 py-1.5 text-xs font-semibold transition-colors motion-reduce:transition-none",
+                      filters.time === value
+                        ? "bg-brand text-white"
+                        : "bg-tint text-ink-soft hover:text-ink",
+                      focusRing
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center justify-around border-t border-line pt-2 text-center">
+                <div>
+                  <span className="text-sm font-bold text-destructive">{counts.high}</span>
+                  <span className="block text-xs text-ink-soft">{t("highRisk")}</span>
                 </div>
-                <div className="mb-3 grid grid-cols-5 gap-2">
-                  {TIME_FILTERS.map(({ value, label }) => (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => setFilters((current) => ({ ...current, time: value }))}
-                      className={`rounded px-2 py-2 text-xs font-medium transition-colors ${
-                        filters.time === value
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
+                <div>
+                  <span className="text-sm font-bold text-warning">{counts.medium}</span>
+                  <span className="block text-xs text-ink-soft">{t("mediumRisk")}</span>
                 </div>
-                <div className="flex items-center justify-around border-t border-muted pt-2 text-center">
-                  <div>
-                    <span className="text-sm font-bold text-destructive">{counts.high}</span>
-                    <span className="block text-xs text-muted-foreground">{t("highRisk")}</span>
-                  </div>
-                  <div>
-                    <span className="text-sm font-bold text-warning">{counts.medium}</span>
-                    <span className="block text-xs text-muted-foreground">{t("mediumRisk")}</span>
-                  </div>
-                  <div>
-                    <span className="text-sm font-bold text-success">{counts.low}</span>
-                    <span className="block text-xs text-muted-foreground">{t("lowRisk")}</span>
-                  </div>
+                <div>
+                  <span className="text-sm font-bold text-success">{counts.low}</span>
+                  <span className="block text-xs text-ink-soft">{t("lowRisk")}</span>
                 </div>
-              </CardContent>
-            </Card>
+              </div>
+            </div>
           )}
 
           {routeError && (
-            <Card className="pointer-events-auto mt-2 border-0 bg-destructive/10 shadow-lg">
-              <CardContent className="p-2">
-                <p className="text-xs text-destructive">{routeError}</p>
-              </CardContent>
-            </Card>
+            <div
+              role="alert"
+              className="glass pointer-events-auto rounded-panel px-3 py-2 text-xs text-ink shadow-float"
+            >
+              {routeError}
+            </div>
           )}
+        </div>
+      )}
 
-          {/* Without a route there is no sheet, so a running share shows here. */}
-          {!route && tripShare.isSharing && (
-            <div className="pointer-events-auto mt-2">{sharePanel(false)}</div>
-          )}
+      {isComposing && (
+        <div className="pointer-events-none absolute inset-x-3 top-3 z-[1000] sm:right-auto sm:w-[26rem]">
+          <div className="glass rounded-panel px-4 py-3 text-sm text-ink-soft shadow-float">
+            Verschuif de kaart of houd een plek ingedrukt om de melding te plaatsen.
+          </div>
         </div>
       )}
 
@@ -537,62 +803,34 @@ const Route = () => {
         </div>
       )}
 
-      {route && (
+      {sheet && (
         <BottomSheet
-          key={isNavigating ? "navigation" : "overview"}
-          label={isNavigating ? "Navigatie" : "Route"}
-          state={isNavigating && sheetState === "hidden" ? "peek" : sheetState}
-          onStateChange={setSheetState}
-          canHide={!isNavigating}
+          key={sheetMode}
+          label={sheet.label}
+          state={sheetState}
+          onStateChange={handleSheetStateChange}
+          canHide={sheet.canHide}
+          withHalf={sheet.withHalf}
           onVisibleHeightChange={setSheetInset}
           className={isNavigating ? "bottom-0 pb-safe" : "bottom-20"}
-          peek={
-            isNavigating && navView ? (
-              <NavigationPeek
-                arrival={navView.arrival}
-                remainingSeconds={navView.remainingSeconds}
-                remainingMeters={navView.remainingMeters}
-                score={route.safety.score}
-                onStop={stopNavigation}
-              />
-            ) : (
-              <RouteOverviewPeek
-                route={route}
-                onStart={startNavigation}
-                onHide={() => setSheetState("hidden")}
-              />
-            )
-          }
+          peek={sheet.peek}
         >
-          <div className="space-y-4">
-            {isNavigating && sharePanel(true)}
-            <SafetyBreakdown safety={route.safety} explanation={explanation} embedded />
-            {!isNavigating && sharePanel(true)}
-          </div>
+          {sheet.content}
         </BottomSheet>
       )}
 
-      {route && !isNavigating && sheetState === "hidden" && (
+      {sheetMode === "route" && route && sheetState === "hidden" && (
         <button
           type="button"
           onClick={() => setSheetState("peek")}
-          className="absolute bottom-24 left-1/2 z-[2000] flex h-11 -translate-x-1/2 items-center gap-2 rounded-full bg-background px-4 text-sm font-semibold shadow-[0_8px_30px_rgba(27,23,37,0.16)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] focus-visible:ring-offset-2"
+          className={cn(
+            "absolute bottom-24 left-1/2 z-[2000] flex h-11 -translate-x-1/2 items-center gap-2 rounded-full px-4 text-sm font-semibold text-ink shadow-float glass",
+            focusRing
+          )}
         >
           <ChevronUp className="h-4 w-4" />
           Route · {route.durationLabel}
         </button>
-      )}
-
-      {selectedReport && (
-        <div className="absolute left-4 right-4 z-[1000]" style={{ bottom: floatingBottom }}>
-          <ReportCard
-            report={selectedReport}
-            currentUserId={user?.id ?? null}
-            onClose={() => setSelectedReport(null)}
-            onLike={handleLike}
-            onDelete={handleDelete}
-          />
-        </div>
       )}
 
       {showWarnings && route && (
@@ -604,9 +842,9 @@ const Route = () => {
         />
       )}
 
-      {/* Boven de bottom-nav, en boven het routepaneel als dat er is. */}
+      {/* Boven de bottom-nav, en boven het paneel. Eigen hoek, altijd bereikbaar. */}
       <div
-        className="absolute right-4 z-[2500] transition-[bottom] duration-300 motion-reduce:transition-none"
+        className="absolute right-[10px] z-[2500] transition-[bottom] duration-300 motion-reduce:transition-none"
         style={{ bottom: floatingBottom }}
       >
         <PanicButton position={navigation.position ?? start} />

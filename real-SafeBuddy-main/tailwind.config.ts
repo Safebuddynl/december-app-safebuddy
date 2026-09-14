@@ -18,8 +18,24 @@ export default {
         'card': 'var(--shadow-card)',
         'elevated': 'var(--shadow-elevated)',
         'glow': 'var(--shadow-glow)',
+        'float': 'var(--shadow-float)',
       },
       colors: {
+        // SafeBuddy design tokens, defined in index.css.
+        brand: {
+          DEFAULT: "var(--brand)",
+          hover: "var(--brand-hover)",
+          tint: "var(--brand-tint)",
+        },
+        ink: {
+          DEFAULT: "var(--ink)",
+          soft: "var(--ink-soft)",
+        },
+        surface: "var(--surface)",
+        tint: "var(--bg-tint)",
+        line: "var(--line)",
+        signal: "var(--signal)",
+        panic: "var(--panic)",
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
@@ -29,6 +45,12 @@ export default {
           DEFAULT: "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",
           light: "hsl(var(--primary-light))",
+          hover: "hsl(var(--primary-hover))",
+          tint: "hsl(var(--primary-tint))",
+        },
+        info: {
+          DEFAULT: "hsl(var(--info))",
+          foreground: "hsl(var(--info-foreground))",
         },
         secondary: {
           DEFAULT: "hsl(var(--secondary))",
@@ -76,6 +98,7 @@ export default {
         },
       },
       borderRadius: {
+        panel: "var(--radius-panel)",
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",

@@ -39,6 +39,25 @@ export const StartPin = () => (
   />
 );
 
+/** A spot being reported: the brand pin with a plus. Anchor at the bottom. */
+export const ReportPin = () => (
+  <svg
+    aria-hidden="true"
+    width="36"
+    height="47"
+    viewBox="0 0 32 42"
+    style={{ filter: "drop-shadow(0 3px 4px rgba(27,23,37,.35))" }}
+  >
+    <path
+      d="M16 1C8.3 1 2 7.2 2 14.9 2 25.3 16 41 16 41s14-15.7 14-26.1C30 7.2 23.7 1 16 1z"
+      style={{ fill: "var(--brand)" }}
+      stroke="#fff"
+      strokeWidth="2"
+    />
+    <path d="M16 9v12M10 15h12" stroke="#fff" strokeWidth="3" strokeLinecap="round" />
+  </svg>
+);
+
 /** The destination: a teardrop pin. Anchor at the bottom. */
 export const DestinationPin = () => (
   <svg

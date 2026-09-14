@@ -88,6 +88,32 @@ export async function addContact(input: {
   };
 }
 
+/** Row level security only lets the owner change their own contacts. */
+export async function updateContact(
+  id: string,
+  input: { name: string; phone?: string; email?: string }
+): Promise<TrustedContact> {
+  const { data, error } = await supabase
+    .from("trusted_contacts")
+    .update({
+      contact_name: input.name.trim(),
+      contact_phone: input.phone?.trim() || null,
+      contact_email: input.email?.trim() || null,
+    })
+    .eq("id", id)
+    .select("id, contact_name, contact_phone, contact_email")
+    .single();
+
+  if (error) throw error;
+
+  return {
+    id: data.id,
+    name: data.contact_name,
+    phone: data.contact_phone,
+    email: data.contact_email,
+  };
+}
+
 export async function removeContact(id: string): Promise<void> {
   const { error } = await supabase.from("trusted_contacts").delete().eq("id", id);
   if (error) throw error;

@@ -70,7 +70,7 @@ export const RouteOverviewPeek = ({ route, onStart, onHide }: RouteOverviewPeekP
         </button>
       </div>
 
-      <Button onClick={onStart} className="mt-3 h-12 w-full rounded-xl text-base font-semibold">
+      <Button onClick={onStart} className="mt-3 h-12 w-full rounded-2xl text-base font-semibold">
         <Navigation className="mr-2 h-5 w-5" />
         Start
       </Button>

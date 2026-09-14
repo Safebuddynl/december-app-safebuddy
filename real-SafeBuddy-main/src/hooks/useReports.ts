@@ -35,6 +35,8 @@ export interface UseReportsResult {
   /** Apply a local change without refetching, e.g. after a like. */
   patchReport: (id: string, changes: Partial<SafetyReport>) => void;
   removeReport: (id: string) => void;
+  /** Show a report the user just created, without refetching everything. */
+  addReport: (report: SafetyReport) => void;
 }
 
 const EMPTY: SafetyReport[] = [];
@@ -93,6 +95,16 @@ export function useReports(): UseReportsResult {
     [queryClient]
   );
 
+  const addReport = useCallback(
+    (report: SafetyReport) => {
+      queryClient.setQueryData<SafetyReport[]>(REPORTS_QUERY_KEY, (current) => [
+        report,
+        ...(current ?? []),
+      ]);
+    },
+    [queryClient]
+  );
+
   return {
     reports,
     mapped,
@@ -102,5 +114,6 @@ export function useReports(): UseReportsResult {
     refresh,
     patchReport,
     removeReport,
+    addReport,
   };
 }
