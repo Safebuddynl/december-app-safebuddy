@@ -1,14 +1,16 @@
 import { Map, MessageSquare, User } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
+import { useLanguage } from "@/i18n/LanguageContext";
 
 const BottomNav = () => {
   const location = useLocation();
+  const { t } = useLanguage();
   
   const navItems = [
-    { path: "/", icon: Map, label: "Route" },
-    { path: "/community", icon: MessageSquare, label: "Reports" },
-    { path: "/profile", icon: User, label: "Profile" },
+    { path: "/", icon: Map, label: t("home") },
+    { path: "/community", icon: MessageSquare, label: t("community") },
+    { path: "/profile", icon: User, label: t("profile") },
   ];
 
   return (

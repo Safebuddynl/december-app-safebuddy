@@ -1,208 +1,197 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const corsHeaders = {
+/**
+ * Berekent een route en scoort hem op gemelde onveilige plekken.
+ *
+ * De vorige versie geocodeerde bij elke aanvraag elk meldingsadres opnieuw via
+ * Nominatim, laadde alle meldingen in het geheugen en vergeleek daarna elk
+ * routepunt met elke melding. Dat zijn duizenden HTTP-calls en miljoenen
+ * afstandsberekeningen per request.
+ *
+ * Nu doet PostGIS het werk: de route gaat als LineString naar de database, en
+ * `get_reports_near_route` geeft alleen de punten terug die binnen de corridor
+ * liggen. Zie migration 20260910120000_reports_near_route.sql.
+ *
+ * De scoring en het antwoordformaat zijn onveranderd, zodat bestaande
+ * aanroepers blijven werken.
+ */
+
+const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-interface SafetyReport {
-  id: string;
-  location_address: string;
-  severity: string;
+/** Meldingen binnen deze afstand van de route tellen mee. */
+const CORRIDOR_METERS = 500;
+
+/** Aftrek per melding, ongewijzigd ten opzichte van de vorige versie. */
+const SEVERITY_PENALTY: Record<string, number> = { high: 30, medium: 15, low: 5 };
+
+/** Gemiddelde snelheid per vervoerswijze, in km/u. */
+const SPEED_KMH: Record<string, number> = { car: 50, bike: 15, foot: 5 };
+
+const OSRM_PROFILE: Record<string, string> = {
+  car: "driving",
+  bike: "cycling",
+  foot: "walking",
+};
+
+interface NearbyReport {
+  id: number;
+  label: string;
   report_type: string;
+  severity: string;
+  lat: number;
+  lng: number;
+  distance_meters: number;
   created_at: string;
 }
 
-interface Location {
-  lat: number;
-  lng: number;
-}
-
-// Calculate distance between two points in km using Haversine formula
-function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371; // Earth's radius in km
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = 
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-// Geocode an address using Nominatim
-async function geocodeAddress(address: string): Promise<Location | null> {
-  try {
-    const response = await fetch(
-      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`
-    );
-    const data = await response.json();
-    if (data && data.length > 0) {
-      return {
-        lat: parseFloat(data[0].lat),
-        lng: parseFloat(data[0].lon),
-      };
-    }
-  } catch (error) {
-    console.error("Geocoding error:", error);
+Deno.serve(async (request: Request) => {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { headers: CORS_HEADERS });
   }
-  return null;
+
+  try {
+    const { startLat, startLng, destLat, destLng, travelMode = "foot" } = await request.json();
+
+    if (![startLat, startLng, destLat, destLng].every((n) => typeof n === "number")) {
+      return json({ error: "startLat, startLng, destLat en destLng zijn verplicht" }, 400);
+    }
+
+    const routes = await fetchRoutes(startLat, startLng, destLat, destLng, travelMode);
+    if (routes.length === 0) {
+      return json({ error: "Could not calculate route" }, 400);
+    }
+
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_ANON_KEY") ?? ""
+    );
+
+    // Elke alternatieve route apart scoren, en de veiligste kiezen.
+    const scored = [];
+    for (const route of routes) {
+      // OSRM geeft GeoJSON [lng, lat]; die volgorde gaat ongewijzigd naar
+      // PostGIS, dat dezelfde conventie gebruikt.
+      const geoJsonCoordinates: [number, number][] = route.geometry.coordinates;
+
+      const reports = await fetchNearbyReports(supabase, geoJsonCoordinates);
+      const safety = scoreRoute(reports);
+
+      scored.push({
+        // De rest van de app werkt met [lat, lng], dus hier omdraaien.
+        coordinates: geoJsonCoordinates.map(([lng, lat]) => [lat, lng] as [number, number]),
+        safety,
+        distance: route.distance,
+      });
+    }
+
+    scored.sort((a, b) => b.safety.score - a.safety.score);
+    const best = scored[0];
+
+    const distanceKm = best.distance / 1000;
+    const speed = SPEED_KMH[travelMode] ?? SPEED_KMH.car;
+    const durationMinutes = Math.max(1, Math.round((distanceKm / speed) * 60));
+
+    return json({
+      coordinates: best.coordinates,
+      distance: distanceKm.toFixed(2) + " km",
+      duration: durationMinutes + " min",
+      safetyScore: best.safety.score,
+      dangerousAreas: best.safety.dangerousAreas,
+      message:
+        best.safety.score < 70
+          ? "Warning: This route passes near reported safety concerns"
+          : best.safety.score < 90
+            ? "Route is relatively safe with minor concerns"
+            : "Route is clear of safety concerns",
+    });
+  } catch (error) {
+    console.error("safe-route failed:", error);
+    return json({ error: error instanceof Error ? error.message : "Unknown error" }, 500);
+  }
+});
+
+interface OsrmRoute {
+  distance: number;
+  geometry: { coordinates: [number, number][] };
 }
 
-// Calculate safety score for a route based on nearby reports
-async function calculateRouteSafety(
-  coordinates: [number, number][],
-  reports: SafetyReport[]
-): Promise<{ score: number; dangerousAreas: string[] }> {
+/** Vraag OSRM om routes, inclusief alternatieven. */
+async function fetchRoutes(
+  startLat: number,
+  startLng: number,
+  destLat: number,
+  destLng: number,
+  travelMode: string
+): Promise<OsrmRoute[]> {
+  const profile = OSRM_PROFILE[travelMode] ?? OSRM_PROFILE.car;
+  const url =
+    `https://router.project-osrm.org/route/v1/${profile}/` +
+    `${startLng},${startLat};${destLng},${destLat}` +
+    "?overview=full&geometries=geojson&alternatives=true";
+
+  const response = await fetch(url);
+  const data = await response.json();
+
+  if (data.code !== "Ok" || !Array.isArray(data.routes)) return [];
+  return data.routes;
+}
+
+/**
+ * Meldingen binnen de corridor rond de route, opgehaald met één spatial query.
+ *
+ * Een LineString heeft minstens twee punten nodig; bij minder valt er niets
+ * te vergelijken.
+ */
+async function fetchNearbyReports(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  coordinates: [number, number][]
+): Promise<NearbyReport[]> {
+  if (coordinates.length < 2) return [];
+
+  const { data, error } = await supabase.rpc("get_reports_near_route", {
+    route_geojson: { type: "LineString", coordinates },
+    radius_meters: CORRIDOR_METERS,
+  });
+
+  if (error) {
+    console.error("get_reports_near_route failed:", error.message);
+    return [];
+  }
+
+  return data ?? [];
+}
+
+/**
+ * Trek per melding punten af, zwaarste eerst.
+ *
+ * Elke melding telt één keer, ook als de route er meerdere keren langskomt.
+ * De database geeft ze al ontdubbeld terug.
+ */
+function scoreRoute(reports: NearbyReport[]): { score: number; dangerousAreas: string[] } {
   let score = 100;
   const dangerousAreas: string[] = [];
-  const reportLocations: Map<string, Location> = new Map();
 
-  // Geocode all report locations
   for (const report of reports) {
-    if (!reportLocations.has(report.location_address)) {
-      const location = await geocodeAddress(report.location_address);
-      if (location) {
-        reportLocations.set(report.location_address, location);
-      }
-    }
-  }
+    const severity = String(report.severity ?? "").toLowerCase();
+    score -= SEVERITY_PENALTY[severity] ?? SEVERITY_PENALTY.low;
 
-  // Check each point on the route
-  for (const [lat, lng] of coordinates) {
-    for (const report of reports) {
-      const reportLocation = reportLocations.get(report.location_address);
-      if (!reportLocation) continue;
-
-      const distance = calculateDistance(lat, lng, reportLocation.lat, reportLocation.lng);
-      
-      // If route passes within 500m of a report
-      if (distance < 0.5) {
-        // Deduct points based on severity
-        if (report.severity === "high") {
-          score -= 30;
-          dangerousAreas.push(`${report.report_type} (High risk) near ${report.location_address}`);
-        } else if (report.severity === "medium") {
-          score -= 15;
-          dangerousAreas.push(`${report.report_type} (Medium risk) near ${report.location_address}`);
-        } else {
-          score -= 5;
-        }
-      }
+    if (severity === "high") {
+      dangerousAreas.push(`${report.report_type} (High risk) near ${report.label}`);
+    } else if (severity === "medium") {
+      dangerousAreas.push(`${report.report_type} (Medium risk) near ${report.label}`);
     }
   }
 
   return { score: Math.max(0, score), dangerousAreas };
 }
 
-serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
-  }
-
-  try {
-    const { startLat, startLng, destLat, destLng, travelMode = "foot" } = await req.json();
-
-    console.log(`Calculating route for travel mode: ${travelMode}`);
-
-    // Create Supabase client
-    const supabaseClient = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_ANON_KEY") ?? ""
-    );
-
-    // Fetch all safety reports
-    const { data: reports, error: reportsError } = await supabaseClient
-      .from("safety_reports")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (reportsError) {
-      console.error("Error fetching reports:", reportsError);
-    }
-
-    const safetyReports: SafetyReport[] = reports || [];
-
-    // Map our modes to OSRM profiles
-    const profileMap: Record<string, string> = {
-      car: "driving",
-      bike: "cycling",
-      foot: "walking",
-    };
-
-    const osrmProfile = profileMap[travelMode] || "driving";
-
-    const osrmUrl = `https://router.project-osrm.org/route/v1/${osrmProfile}/${startLng},${startLat};${destLng},${destLat}?overview=full&geometries=geojson&alternatives=true`;
-    
-    console.log(`Routing URL: ${osrmUrl}`);
-    
-    const mainRouteResponse = await fetch(osrmUrl);
-    const mainRouteData = await mainRouteResponse.json();
-    
-    console.log(`OSRM response code: ${mainRouteData.code}, routes: ${mainRouteData.routes?.length || 0}`);
-
-    if (mainRouteData.code !== "Ok" || !mainRouteData.routes || mainRouteData.routes.length === 0) {
-      return new Response(
-        JSON.stringify({ error: "Could not calculate route" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Evaluate all alternative routes
-    const routesWithSafety = await Promise.all(
-      mainRouteData.routes.map(async (route: any) => {
-        const coordinates: [number, number][] = route.geometry.coordinates.map(
-          (coord: number[]) => [coord[1], coord[0]] // Convert [lng, lat] to [lat, lng]
-        );
-
-        const safety = await calculateRouteSafety(coordinates, safetyReports);
-
-        return {
-          route,
-          coordinates,
-          safety,
-          distance: route.distance,
-          duration: route.duration,
-        };
-      })
-    );
-
-    // Sort by safety score (higher is better)
-    routesWithSafety.sort((a, b) => b.safety.score - a.safety.score);
-
-    // Return the safest route
-    const bestRoute = routesWithSafety[0];
-
-    // Compute duration based on travel mode speeds
-    const distanceKm = bestRoute.distance / 1000;
-    let speedKmh = 50; // default car
-    if (travelMode === "bike") speedKmh = 15;
-    if (travelMode === "foot") speedKmh = 5;
-    const durationMinutes = Math.max(1, Math.round((distanceKm / speedKmh) * 60));
-
-    return new Response(
-      JSON.stringify({
-        coordinates: bestRoute.coordinates,
-        distance: distanceKm.toFixed(2) + " km",
-        duration: durationMinutes + " min",
-        safetyScore: bestRoute.safety.score,
-        dangerousAreas: bestRoute.safety.dangerousAreas,
-        message:
-          bestRoute.safety.score < 70
-            ? "Warning: This route passes near reported safety concerns"
-            : bestRoute.safety.score < 90
-            ? "Route is relatively safe with minor concerns"
-            : "Route is clear of safety concerns",
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-  } catch (error) {
-    console.error("Error in safe-route function:", error);
-    return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-  }
-});
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+  });

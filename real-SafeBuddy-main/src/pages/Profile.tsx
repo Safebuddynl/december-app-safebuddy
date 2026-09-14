@@ -1,6 +1,8 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import type { Database } from "@/integrations/supabase/types";
+import { errorMessage } from "@/lib/errors";
 import { User } from "@supabase/supabase-js";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -8,24 +10,37 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { User as UserIcon, Settings, Users, Shield, LogOut, Camera, Loader2 } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Camera, Loader2, LogOut, Shield } from "lucide-react";
 import { toast } from "sonner";
+import { useLanguage } from "@/i18n/LanguageContext";
 import BottomNav from "@/components/BottomNav";
 import SafetySettingsDialog from "@/components/SafetySettingsDialog";
+import TrustedContactsCard from "@/components/TrustedContactsCard";
+
+type ProfileRow = Database["public"]["Tables"]["profiles"]["Row"];
 
 const Profile = () => {
   const navigate = useNavigate();
+  const { t } = useLanguage();
   const [user, setUser] = useState<User | null>(null);
-  const [profile, setProfile] = useState<any>(null);
+  const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [isEditing, setIsEditing] = useState(false);
   const [username, setUsername] = useState("");
   const [bio, setBio] = useState("");
+  const [languages, setLanguages] = useState<string[]>([]);
   const [nowTs, setNowTs] = useState<number>(Date.now());
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showSafetySettings, setShowSafetySettings] = useState(false);
-  const [verificationStatus, setVerificationStatus] = useState<string | null>(null);
+  const [reportCount, setReportCount] = useState(0);
+
+  const availableLanguages = [
+    { id: "dutch", label: "Nederlands", flag: "🇳🇱" },
+    { id: "english", label: "English", flag: "🇬🇧" },
+    { id: "french", label: "Français", flag: "🇫🇷" }
+  ];
 
   useEffect(() => {
     const fetchProfile = async () => {
@@ -48,27 +63,38 @@ const Profile = () => {
         setProfile(profileData);
         setUsername(profileData.username || "");
         setBio(profileData.bio || "");
+        setLanguages(profileData.languages || []);
       }
 
-      // Fetch verification status
-      const { data: verificationData } = await supabase
-        .from("user_verifications")
-        .select("verification_status")
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .single();
+      // `head: true` asks for the count only, instead of downloading every row.
+      const { count } = await supabase
+        .from("safety_reports")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", user.id);
 
-      if (verificationData) {
-        setVerificationStatus(verificationData.verification_status);
+      if (count !== null) {
+        setReportCount(count);
       }
-      
+
       setLoading(false);
     };
 
     fetchProfile();
-    const t = setInterval(() => setNowTs(Date.now()), 60_000);
-    return () => clearInterval(t);
+
+    // Refreshes the username cooldown countdown once a minute.
+    const cooldownTimer = setInterval(() => setNowTs(Date.now()), 60_000);
+
+    // ReportLocationDialog dispatches this after a successful submission.
+    const handleReportSubmitted = () => {
+      refreshReportCount();
+    };
+
+    window.addEventListener("reportSubmitted", handleReportSubmitted);
+
+    return () => {
+      clearInterval(cooldownTimer);
+      window.removeEventListener("reportSubmitted", handleReportSubmitted);
+    };
   }, [navigate]);
 
   const handleAvatarClick = () => {
@@ -119,13 +145,36 @@ const Profile = () => {
 
       if (updateError) throw updateError;
 
-      setProfile({ ...profile, avatar_url: publicUrl });
-      toast.success("Profile picture updated!");
-    } catch (error: any) {
+      setProfile((current) => (current ? { ...current, avatar_url: publicUrl } : current));
+      toast.success(t("profileUpdated"));
+    } catch (error) {
       console.error("Error uploading avatar:", error);
-      toast.error(error.message || "Failed to upload profile picture");
+      toast.error(errorMessage(error, "Profielfoto uploaden is mislukt"));
     } finally {
       setUploading(false);
+    }
+  };
+
+  const toggleLanguage = (langId: string) => {
+    setLanguages(prev =>
+      prev.includes(langId)
+        ? prev.filter(l => l !== langId)
+        : [...prev, langId]
+    );
+  };
+
+  const refreshReportCount = async () => {
+    const { data: auth } = await supabase.auth.getUser();
+    const currentUser = auth?.user;
+    if (!currentUser) return;
+
+    const { count } = await supabase
+      .from("safety_reports")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", currentUser.id);
+
+    if (count !== null) {
+      setReportCount(count);
     }
   };
 
@@ -134,41 +183,48 @@ const Profile = () => {
 
     try {
       const changedUsername = username.trim() !== (profile?.username || "");
-      // Enforce 30-day cooldown client-side for better UX
+
+      // A database trigger enforces the 30-day cooldown. Checking it here too
+      // turns a rejected write into an immediate, specific message.
       if (changedUsername && profile?.last_username_change) {
         const last = new Date(profile.last_username_change).getTime();
-        const diffDays = (nowTs - last) / (1000 * 60 * 60 * 24);
-        if (diffDays < 30) {
-          const daysLeft = Math.ceil(30 - diffDays);
-          toast.error(`You can change your username again in ${daysLeft} day(s).`);
+        const daysSinceChange = (nowTs - last) / (1000 * 60 * 60 * 24);
+        if (daysSinceChange < 30) {
+          const daysLeft = Math.ceil(30 - daysSinceChange);
+          toast.error(`${t("usernameChangeCooldown")} (${daysLeft} dagen)`);
           return;
         }
       }
 
-      const { error } = await supabase
-        .from("profiles")
-        .update(changedUsername ? { username, bio, last_username_change: new Date().toISOString() } : { username, bio })
-        .eq("id", user.id);
+      const changes = {
+        username,
+        bio,
+        languages,
+        ...(changedUsername ? { last_username_change: new Date().toISOString() } : {}),
+      };
 
+      const { error } = await supabase.from("profiles").update(changes).eq("id", user.id);
       if (error) throw error;
 
-      setProfile({ ...profile, username, bio, last_username_change: changedUsername ? new Date().toISOString() : profile?.last_username_change });
+      setProfile((current) => (current ? { ...current, ...changes } : current));
       setIsEditing(false);
-      toast.success("Profile updated!");
-    } catch (error: any) {
+      toast.success(t("profileUpdated"));
+    } catch (error) {
       console.error("Error updating profile:", error);
-      // If the DB trigger blocks the change, show a friendly message
-      const msg = (error.message || "").toLowerCase().includes("30 days")
-        ? "You can only change your username once every 30 days."
-        : (error.message || "Failed to update profile");
-      toast.error(msg);
+
+      // The database trigger rejects an early username change; translate that
+      // into the same message the client-side check uses.
+      const message = errorMessage(error, t("failedUpdateProfile"));
+      toast.error(
+        message.toLowerCase().includes("30 days") ? t("usernameChangeCooldown") : message
+      );
     }
   };
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
     navigate("/auth");
-    toast.success("Logged out successfully");
+    toast.success(t("signOutSuccessfully"));
   };
 
   if (loading) {
@@ -217,34 +273,56 @@ const Profile = () => {
             {isEditing ? (
               <div className="space-y-3">
                 <div>
-                  <Label htmlFor="username" className="text-white">Username</Label>
+                  <Label htmlFor="username" className="text-white">{t("username")}</Label>
                   <Input
                     id="username"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    placeholder="Enter username"
+                    placeholder={t("enterUsername")}
                     className="bg-white/20 border-white/30 text-white placeholder:text-white/60"
                   />
                   {profile?.last_username_change && (
                     <p className="text-xs text-white/80 mt-1">
-                      Next change available on {new Date(new Date(profile.last_username_change).getTime() + 30*24*60*60*1000).toLocaleDateString()}
+                      {t("nextChangeAvailable")} {new Date(new Date(profile.last_username_change).getTime() + 30*24*60*60*1000).toLocaleDateString()}
                     </p>
                   )}
                 </div>
                 <div>
-                  <Label htmlFor="bio" className="text-white">Bio</Label>
+                  <Label htmlFor="bio" className="text-white">{t("bio")}</Label>
                   <Textarea
                     id="bio"
                     value={bio}
                     onChange={(e) => setBio(e.target.value)}
-                    placeholder="Tell us about yourself"
+                    placeholder={t("tellAboutYourself")}
                     rows={3}
                     className="bg-white/20 border-white/30 text-white placeholder:text-white/60"
                   />
                 </div>
+                <div>
+                  <Label className="text-white mb-3 block">{t("languages")}</Label>
+                  <div className="space-y-2">
+                    {availableLanguages.map((lang) => (
+                      <div key={lang.id} className="flex items-center gap-3 p-2 rounded bg-white/10 hover:bg-white/20 transition">
+                        <Checkbox
+                          id={`lang-${lang.id}`}
+                          checked={languages.includes(lang.id)}
+                          onCheckedChange={() => toggleLanguage(lang.id)}
+                          className="accent-white"
+                        />
+                        <label
+                          htmlFor={`lang-${lang.id}`}
+                          className="flex items-center gap-2 cursor-pointer text-white flex-1"
+                        >
+                          <span>{lang.flag}</span>
+                          <span>{lang.label}</span>
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                </div>
                 <div className="flex gap-2">
                   <Button onClick={handleSaveProfile} className="flex-1 bg-white text-primary hover:bg-white/90">
-                    Save Changes
+                    {t("saveChanges")}
                   </Button>
                   <Button
                     variant="ghost"
@@ -252,10 +330,11 @@ const Profile = () => {
                       setIsEditing(false);
                       setUsername(profile?.username || "");
                       setBio(profile?.bio || "");
+                      setLanguages(profile?.languages || []);
                     }}
                     className="flex-1 text-white hover:bg-white/10"
                   >
-                    Cancel
+                    {t("cancel")}
                   </Button>
                 </div>
               </div>
@@ -265,34 +344,28 @@ const Profile = () => {
                 <p className="text-white/80 text-sm">{user?.email}</p>
                 <p className="text-white/90">{profile?.bio || `Hello, I'm ${profile?.username || "User"}!`}</p>
                 
-                {/* Edit Profile Button */}
+                {profile?.languages && profile.languages.length > 0 && (
+                  <div className="flex flex-wrap gap-2 justify-center mt-2">
+                    {profile.languages.map((langId: string) => {
+                      const lang = availableLanguages.find(l => l.id === langId);
+                      return lang ? (
+                        <span key={langId} className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white/20 text-white text-sm">
+                          <span>{lang.flag}</span>
+                          <span>{lang.label}</span>
+                        </span>
+                      ) : null;
+                    })}
+                  </div>
+                )}
+                
                 <Button
                   variant="ghost"
                   size="sm"
                   onClick={() => setIsEditing(true)}
                   className="mt-2 text-white/90 hover:text-white hover:bg-white/10"
                 >
-                  ✏️ Edit Profile
+                  ✏️ {t("editProfile")}
                 </Button>
-                
-                {verificationStatus && (
-                    <div className={`flex items-center gap-2 rounded-full px-4 py-2 ${
-                      verificationStatus === 'approved' 
-                        ? 'bg-success/20' 
-                        : verificationStatus === 'pending'
-                        ? 'bg-warning/20'
-                        : 'bg-destructive/20'
-                    }`}>
-                      <Shield className="h-4 w-4 text-white" />
-                      <span className="text-white font-semibold">
-                        {verificationStatus === 'approved' 
-                          ? 'Verified' 
-                          : verificationStatus === 'pending'
-                          ? 'Pending Verification'
-                          : 'Not Verified'}
-                      </span>
-                    </div>
-                  )}
               </>
             )}
           </div>
@@ -305,59 +378,51 @@ const Profile = () => {
         <Card className="shadow-card mb-6">
           <CardContent className="p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-foreground">Statistics</h3>
-              {!isEditing && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setIsEditing(true)}
-                  className="text-primary hover:text-primary/80"
-                >
-                  Edit
-                </Button>
-              )}
+              <h3 className="font-semibold text-foreground">{t("statistics")}</h3>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="text-center">
                 <div className="text-3xl font-bold text-primary mb-1">0</div>
-                <div className="text-sm text-muted-foreground">Safe Routes</div>
+                <div className="text-sm text-muted-foreground">{t("safeRoutes")}</div>
               </div>
               <div className="text-center">
-                <div className="text-3xl font-bold text-primary mb-1">0</div>
-                <div className="text-sm text-muted-foreground">Reports</div>
+                <div className="text-3xl font-bold text-primary mb-1">{reportCount}</div>
+                <div className="text-sm text-muted-foreground">{t("reports")}</div>
               </div>
             </div>
           </CardContent>
         </Card>
+
+        <TrustedContactsCard />
 
         {/* Safety Preferences */}
         <Card className="shadow-card mb-6">
           <CardContent className="p-6 space-y-4">
             <div className="flex items-center gap-2 mb-3">
               <Shield className="h-5 w-5 text-primary" />
-              <h3 className="font-semibold text-foreground">Safety Preferences</h3>
+              <h3 className="font-semibold text-foreground">{t("safetyPreferences")}</h3>
             </div>
             
             <div className="flex items-center justify-between py-2">
               <div>
-                <p className="font-medium text-foreground">Avoid dark streets</p>
-                <p className="text-sm text-muted-foreground">Prioritize well-lit routes</p>
+                <p className="font-medium text-foreground">{t("avoidDarkStreets")}</p>
+                <p className="text-sm text-muted-foreground">{t("prioritizeWellLit")}</p>
               </div>
               <input type="checkbox" className="w-5 h-5 accent-primary" />
             </div>
             
             <div className="flex items-center justify-between py-2">
               <div>
-                <p className="font-medium text-foreground">Prefer busy areas</p>
-                <p className="text-sm text-muted-foreground">Route through populated streets</p>
+                <p className="font-medium text-foreground">{t("preferBusyAreas")}</p>
+                <p className="text-sm text-muted-foreground">{t("routePopulated")}</p>
               </div>
               <input type="checkbox" className="w-5 h-5 accent-primary" />
             </div>
             
             <div className="flex items-center justify-between py-2">
               <div>
-                <p className="font-medium text-foreground">Notifications</p>
-                <p className="text-sm text-muted-foreground">Safety alerts and updates</p>
+                <p className="font-medium text-foreground">{t("notifications")}</p>
+                <p className="text-sm text-muted-foreground">{t("safetyAlertsUpdates")}</p>
               </div>
               <input type="checkbox" className="w-5 h-5 accent-primary" defaultChecked />
             </div>
@@ -376,8 +441,8 @@ const Profile = () => {
                 <Shield className="h-5 w-5 text-primary" />
               </div>
               <div className="text-left">
-                <p className="font-semibold text-foreground">Settings</p>
-                <p className="text-xs text-muted-foreground">Manage your preferences</p>
+                <p className="font-semibold text-foreground">{t("settings")}</p>
+                <p className="text-xs text-muted-foreground">{t("managePreferences")}</p>
               </div>
             </div>
             <span className="text-muted-foreground">→</span>
@@ -392,8 +457,8 @@ const Profile = () => {
                 <Shield className="h-5 w-5 text-primary" />
               </div>
               <div className="text-left">
-                <p className="font-semibold text-foreground">About SafeBuddy</p>
-                <p className="text-xs text-muted-foreground">More information</p>
+                <p className="font-semibold text-foreground">{t("aboutSafeBuddy")}</p>
+                <p className="text-xs text-muted-foreground">{t("moreInformation")}</p>
               </div>
             </div>
             <span className="text-muted-foreground">→</span>
@@ -407,13 +472,13 @@ const Profile = () => {
           onClick={handleLogout}
         >
           <LogOut className="h-5 w-5 text-destructive" />
-          <span className="font-semibold text-destructive">Log Out</span>
+          <span className="font-semibold text-destructive">{t("logOut")}</span>
         </Button>
 
         {/* Small Ad Space */}
         <div className="mt-6">
           <div className="bg-muted/50 border border-border rounded-lg p-3 text-center">
-            <span className="text-xs text-muted-foreground">Advertisement</span>
+            <span className="text-xs text-muted-foreground">{t("advertisement")}</span>
           </div>
         </div>
 

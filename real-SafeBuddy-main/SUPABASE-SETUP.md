@@ -1,96 +1,70 @@
-# Supabase Setup Guide
+# Supabase setup
 
-## Voor het hele team - Gebruik de gedeelde Supabase database
+The whole team shares one Supabase project, so there is usually nothing to set
+up beyond filling in `.env.local`. See the README for that.
 
-### Optie 1: Gebruik de bestaande gedeelde database (Aanbevolen)
+## Working against a local database
 
-Alle teamleden kunnen dezelfde Supabase database gebruiken. Je hebt alleen de environment variabelen nodig:
+Useful when you want to try a migration without touching shared data.
 
-1. **Vraag aan het team om het `.env` bestand** (of kopieer de waardes hieronder):
-```env
-VITE_SUPABASE_URL=https://irrinahkpkuaqcrlovph.supabase.co
-VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_d2T0MP9vEoQHZWPZq2Vv4A_HQ5XP5Yp
-VITE_MAPBOX_TOKEN=pk.eyJ1IjoibWFyY2VsbG8xMjciLCJhIjoiY21qMDNsZGpnMDRobTNlc2I4ZWk0amI1ZSJ9.E08Oysm7mEJZTko5xHDcyQ
-```
-
-2. **Dat is het!** Je kunt nu ontwikkelen met de gedeelde database.
-
-**Voordelen:**
-- ✅ Iedereen ziet dezelfde data
-- ✅ Geen lokale database setup nodig
-- ✅ Real-time samenwerking mogelijk
-- ✅ Werkt meteen
-
----
-
-## Optie 2: Lokale Supabase database (Voor gevorderde gebruikers)
-
-Als je een lokale database wilt voor development:
-
-### Installeer Supabase CLI
-```bash
+```sh
 npm install -g supabase
+supabase start        # Postgres + API + Studio on http://localhost:54323
+supabase db reset     # applies everything in supabase/migrations/
 ```
 
-### Start lokale Supabase
-```bash
-cd real-SafeBuddy-main
-supabase start
-```
+Then point `.env.local` at the local instance. `supabase start` prints the URL
+and anon key to use:
 
-Dit start:
-- Lokale PostgreSQL database
-- Lokale API server
-- Lokale Studio UI op http://localhost:54323
-
-### Run migrations
-```bash
-supabase db reset
-```
-
-Dit importeert alle migrations uit `supabase/migrations/` naar je lokale database.
-
-### Update .env voor lokale development
 ```env
 VITE_SUPABASE_URL=http://localhost:54321
-VITE_SUPABASE_PUBLISHABLE_KEY=<key uit supabase start output>
-VITE_MAPBOX_TOKEN=pk.eyJ1IjoibWFyY2VsbG8xMjciLCJhIjoiY21qMDNsZGpnMDRobTNlc2I4ZWk0amI1ZSJ9.E08Oysm7mEJZTko5xHDcyQ
+VITE_SUPABASE_PUBLISHABLE_KEY=<anon key from the supabase start output>
 ```
 
-### Stop lokale Supabase
-```bash
-supabase stop
+Stop it again with `supabase stop`.
+
+## Migrations
+
+Everything in `supabase/migrations/` runs in filename order, and that order is
+the schema's history. Add a new one with:
+
+```sh
+supabase migration new <name>
 ```
 
----
+After the schema changes, regenerate the TypeScript types so the client knows
+about it:
 
-## Supabase Studio (Database beheer)
-
-- **Production database**: https://supabase.com/dashboard/project/irrinahkpkuaqcrlovph
-- **Lokale database**: http://localhost:54323 (als je Optie 2 gebruikt)
-
-Vraag aan de project eigenaar voor toegang tot het Supabase dashboard.
-
----
-
-## Database Migrations
-
-Alle database migrations staan in `supabase/migrations/`. Als je de gedeelde database gebruikt (Optie 1), zijn deze al uitgevoerd.
-
-Bij lokale development (Optie 2) worden ze automatisch toegepast met `supabase db reset`.
-
-### Nieuwe migration toevoegen
-```bash
-supabase migration new <naam_van_migration>
+```sh
+npx supabase gen types typescript --project-id <project-id> > src/integrations/supabase/types.ts
 ```
 
----
+Skipping that step is why `report_likes` and the `profiles.languages` column
+were invisible to TypeScript for a while, which forced casts in application code.
 
-## Edge Functions
+## Tables the app reads
 
-De volgende Supabase Edge Functions zijn beschikbaar:
-- `geocode-location` - Geocoding van adressen
-- `safe-route` - Veilige route berekening
-- `verify-face-match` - Gezichtsherkenning verificatie
+| Table | Written by | Notes |
+| --- | --- | --- |
+| `profiles` | users | Username changes are rate-limited to once per 30 days by a trigger |
+| `safety_reports` | users | Position lives in the PostGIS `location` column |
+| `report_likes` | users | One row per user per report; the total is mirrored onto `safety_reports.upvotes` |
+| `KRO_Reports_15K` | import | Read-only historic dataset, roughly 15.000 rows |
 
-Deze draaien automatisch op de production Supabase instance.
+Two quirks of `KRO_Reports_15K` are worth knowing, because the client works
+around both:
+
+- `latitude` and `longitude` are **text** using a comma decimal separator
+  ("52,388404"). Passing those to `parseFloat` silently yields `52`.
+- `severity` is capitalised ("High", "Medium") where `safety_reports` uses
+  lowercase.
+
+Normalising this in the database instead would let the client drop
+`parseCoordinate` and `normaliseSeverity`.
+
+## Edge functions
+
+`supabase/functions/` holds three Deno functions: `geocode-location`,
+`safe-route` and `verify-face-match`. **None of them is called by the app** —
+geocoding and routing happen client-side against Mapbox. Keep them only if you
+plan to move that work server-side; otherwise they can be deleted.

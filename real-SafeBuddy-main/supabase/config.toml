@@ -3,8 +3,10 @@ project_id = "udvrwujgkvoekgdnfztl"
 [functions.safe-route]
 verify_jwt = false
 
-[functions.verify-face-match]
+[functions.geocode-location]
 verify_jwt = false
 
-[functions.geocode-location]
+# Draait op een schema, niet namens een gebruiker. Beveiligd met CRON_SECRET
+# en de service-role key, niet met een JWT.
+[functions.check-overdue-trips]
 verify_jwt = false

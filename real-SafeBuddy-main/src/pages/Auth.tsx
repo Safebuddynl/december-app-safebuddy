@@ -1,16 +1,19 @@
-import { useState, useRef, useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Label } from "@/components/ui/label";
-import { supabase, isSupabaseConfigured } from "@/integrations/supabase/client";
+import { supabase } from "@/integrations/supabase/client";
+import { isSupabaseConfigured } from "@/lib/env";
+import { errorMessage } from "@/lib/errors";
 import { toast } from "sonner";
-import { Shield, Upload, FileText, Camera, Eye, EyeOff } from "lucide-react";
+import { useLanguage } from "@/i18n/LanguageContext";
+import { Eye, EyeOff, Shield } from "lucide-react";
 
 const Auth = () => {
   const navigate = useNavigate();
+  const { t } = useLanguage();
   const [isLoading, setIsLoading] = useState(false);
   const supabaseReady = isSupabaseConfigured();
   
@@ -25,17 +28,20 @@ const Auth = () => {
   const [signupUsername, setSignupUsername] = useState("");
   const [showSignupPassword, setShowSignupPassword] = useState(false);
   const [showSignupConfirm, setShowSignupConfirm] = useState(false);
-  // Removed ID verification requirements
 
-  // Password validation rules
-  const passwordChecks = useMemo(() => {
-    const length = signupPassword.length >= 8;
-    const upper = /[A-Z]/.test(signupPassword);
-    const lower = /[a-z]/.test(signupPassword);
-    const number = /[0-9]/.test(signupPassword);
-    const special = /[^A-Za-z0-9]/.test(signupPassword);
-    return { length, upper, lower, number, special };
-  }, [signupPassword]);
+  // Password rules, shown as a live checklist and enforced on submit.
+  const passwordChecks = useMemo(
+    () => ({
+      length: signupPassword.length >= 8,
+      upper: /[A-Z]/.test(signupPassword),
+      lower: /[a-z]/.test(signupPassword),
+      number: /[0-9]/.test(signupPassword),
+      special: /[^A-Za-z0-9]/.test(signupPassword),
+    }),
+    [signupPassword]
+  );
+
+  const passwordMeetsRules = Object.values(passwordChecks).every(Boolean);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -71,7 +77,7 @@ const Auth = () => {
           .select("id, username")
           .eq("id", user.id)
           .single();
-        const metaUsername = (user.user_metadata as any)?.username;
+        const metaUsername = user.user_metadata?.username as string | undefined;
         if (!profileRow || !profileRow.username) {
           await supabase
             .from("profiles")
@@ -81,8 +87,8 @@ const Auth = () => {
 
       toast.success("Welcome back!");
       navigate("/profile");
-    } catch (error: any) {
-      toast.error(error.message || "Failed to login");
+    } catch (error) {
+      toast.error(errorMessage(error, t("failedUpdateProfile")));
     } finally {
       setIsLoading(false);
     }
@@ -91,12 +97,17 @@ const Auth = () => {
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (signupPassword !== signupConfirmPassword) {
-      toast.error("Passwords do not match");
+    // The checklist below the field showed these rules but nothing enforced
+    // them, so an account could be created with a one-character password.
+    if (!passwordMeetsRules) {
+      toast.error("Je wachtwoord voldoet nog niet aan alle eisen");
       return;
     }
 
-    // ID verification removed: no document or selfie required
+    if (signupPassword !== signupConfirmPassword) {
+      toast.error(t("passwordsNoMatch"));
+      return;
+    }
 
     setIsLoading(true);
 
@@ -121,14 +132,14 @@ const Auth = () => {
         await supabase
           .from("profiles")
           .upsert({ id: authData.user.id, username: signupUsername, email: signupEmail });
-        toast.success("Account created!");
+        toast.success(t("profileUpdated"));
         navigate("/profile");
       } else {
         // Otherwise rely on DB trigger to create profile from metadata
         toast.success("Account created! Please confirm via email to continue.");
       }
-    } catch (error: any) {
-      toast.error(error.message || "Failed to sign up");
+    } catch (error) {
+      toast.error(errorMessage(error, "Account aanmaken is mislukt"));
     } finally {
       setIsLoading(false);
     }
@@ -150,8 +161,8 @@ const Auth = () => {
 
           <Tabs defaultValue="login" className="w-full">
             <TabsList className="grid w-full grid-cols-2 mb-6">
-              <TabsTrigger value="login">Login</TabsTrigger>
-              <TabsTrigger value="signup">Sign Up</TabsTrigger>
+              <TabsTrigger value="login">{t("signIn")}</TabsTrigger>
+              <TabsTrigger value="signup">{t("signUp")}</TabsTrigger>
             </TabsList>
 
             <TabsContent value="login">
@@ -162,20 +173,20 @@ const Auth = () => {
               )}
               <form onSubmit={handleLogin} className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Email or Username</label>
+                  <label className="text-sm font-medium">{t("email")}</label>
                   <Input
                     type="text"
-                    placeholder="Enter your email or username"
+                    placeholder={t("enterEmail")}
                     value={loginIdentifier}
                     onChange={(e) => setLoginIdentifier(e.target.value)}
                     required
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Password</label>
+                  <label className="text-sm font-medium">{t("password")}</label>
                   <Input
                     type="password"
-                    placeholder="Enter your password"
+                    placeholder={t("enterPassword")}
                     value={loginPassword}
                     onChange={(e) => setLoginPassword(e.target.value)}
                     required
@@ -186,7 +197,7 @@ const Auth = () => {
                   className="w-full bg-gradient-to-r from-primary to-secondary"
                   disabled={isLoading || !supabaseReady}
                 >
-                  {isLoading ? "Logging in..." : "Login"}
+                  {isLoading ? `${t("loading")}...` : t("signInButton")}
                 </Button>
               </form>
             </TabsContent>
@@ -199,31 +210,31 @@ const Auth = () => {
               )}
               <form onSubmit={handleSignup} className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Username</label>
+                  <label className="text-sm font-medium">{t("username")}</label>
                   <Input
                     type="text"
-                    placeholder="Choose a username"
+                    placeholder={t("enterUsername")}
                     value={signupUsername}
                     onChange={(e) => setSignupUsername(e.target.value)}
                     required
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Email</label>
+                  <label className="text-sm font-medium">{t("email")}</label>
                   <Input
                     type="email"
-                    placeholder="Enter your email"
+                    placeholder={t("enterEmail")}
                     value={signupEmail}
                     onChange={(e) => setSignupEmail(e.target.value)}
                     required
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Password</label>
+                  <label className="text-sm font-medium">{t("password")}</label>
                   <div className="relative">
                     <Input
                       type={showSignupPassword ? "text" : "password"}
-                      placeholder="Create a password"
+                      placeholder={t("enterPassword")}
                       value={signupPassword}
                       onChange={(e) => setSignupPassword(e.target.value)}
                       required
@@ -247,28 +258,28 @@ const Auth = () => {
                   </div>
                   <ul className="mt-2 space-y-1 text-sm">
                     <li className={passwordChecks.length ? "text-green-600" : "text-muted-foreground"}>
-                      {passwordChecks.length ? "✔" : "✖"} At least 8 characters
+                      {passwordChecks.length ? "✔" : "✖"} {t("passwordMinLength")}
                     </li>
                     <li className={passwordChecks.upper ? "text-green-600" : "text-muted-foreground"}>
-                      {passwordChecks.upper ? "✔" : "✖"} At least 1 uppercase letter
+                      {passwordChecks.upper ? "✔" : "✖"} {t("passwordUppercase")}
                     </li>
                     <li className={passwordChecks.lower ? "text-green-600" : "text-muted-foreground"}>
-                      {passwordChecks.lower ? "✔" : "✖"} At least 1 lowercase letter
+                      {passwordChecks.lower ? "✔" : "✖"} {t("passwordLowercase")}
                     </li>
                     <li className={passwordChecks.number ? "text-green-600" : "text-muted-foreground"}>
-                      {passwordChecks.number ? "✔" : "✖"} At least 1 number
+                      {passwordChecks.number ? "✔" : "✖"} {t("passwordNumber")}
                     </li>
                     <li className={passwordChecks.special ? "text-green-600" : "text-muted-foreground"}>
-                      {passwordChecks.special ? "✔" : "✖"} At least 1 special character
+                      {passwordChecks.special ? "✔" : "✖"} {t("passwordSpecial")}
                     </li>
                   </ul>
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Confirm Password</label>
+                  <label className="text-sm font-medium">{t("confirmPassword")}</label>
                   <div className="relative">
                     <Input
                       type={showSignupConfirm ? "text" : "password"}
-                      placeholder="Confirm your password"
+                      placeholder={t("enterConfirmPassword")}
                       value={signupConfirmPassword}
                       onChange={(e) => setSignupConfirmPassword(e.target.value)}
                       required
@@ -291,18 +302,17 @@ const Auth = () => {
                     </button>
                   </div>
                   {signupConfirmPassword && signupPassword !== signupConfirmPassword && (
-                    <p className="text-red-600 text-sm mt-1">Passwords do not match</p>
+                    <p className="text-red-600 text-sm mt-1">{t("passwordsNoMatch")}</p>
                   )}
                 </div>
 
-                {/* ID Verification removed */}
 
                 <Button
                   type="submit"
                   className="w-full bg-gradient-to-r from-primary to-secondary"
                   disabled={isLoading || !supabaseReady}
                 >
-                  {isLoading ? "Creating account..." : "Sign Up"}
+                  {isLoading ? `${t("loading")}...` : t("signUpButton")}
                 </Button>
                 
                 

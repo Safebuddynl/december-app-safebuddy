@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useLanguage } from "@/i18n/LanguageContext";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { MapPin, Locate } from "lucide-react";
@@ -14,8 +15,11 @@ interface ReportLocationDialogProps {
   onReportSubmitted?: () => void;
 }
 
+/** One result from the Nominatim search API. */
 interface AddressSuggestion {
   display_name: string;
+  lat: string;
+  lon: string;
   address?: {
     road?: string;
     house_number?: string;
@@ -27,6 +31,7 @@ interface AddressSuggestion {
 }
 
 const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportLocationDialogProps) => {
+  const { t } = useLanguage();
   const [locationAddress, setLocationAddress] = useState("");
   const [coordinates, setCoordinates] = useState<{ lat: number; lon: number } | null>(null);
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
@@ -87,11 +92,10 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
     return parts.length > 0 ? parts.join(", ") : suggestion.display_name;
   };
 
-  const selectSuggestion = (suggestion: any) => {
-    const formattedAddress = formatStreetAddress(suggestion);
-    setLocationAddress(formattedAddress);
-    // Sla coördinaten op voor PostGIS
-    setCoordinates({ lat: parseFloat(suggestion.lat), lon: parseFloat(suggestion.lon) });
+  const selectSuggestion = (suggestion: AddressSuggestion) => {
+    setLocationAddress(formatStreetAddress(suggestion));
+    // Stored so the report can be written as a PostGIS point.
+    setCoordinates({ lat: Number(suggestion.lat), lon: Number(suggestion.lon) });
     setShowSuggestions(false);
   };
 
@@ -122,7 +126,7 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
           toast.error("Locatie toegang is geblokkeerd. Ga naar je browser instellingen.");
           return;
         }
-      } catch (e) {
+      } catch {
         // Continue anyway
       }
     }
@@ -225,6 +229,9 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
       toast.success("Safety report submitted successfully!");
       onReportSubmitted?.();
       
+      // Emit event so Profile can update report count
+      window.dispatchEvent(new Event('reportSubmitted'));
+      
       setLocationAddress("");
       setCoordinates(null);
       setReportType("");
@@ -246,17 +253,17 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
         <DialogHeader className="bg-gradient-to-r from-primary to-primary-light p-4 -m-6 mb-4 rounded-t-lg">
           <div className="flex items-center gap-2 text-primary-foreground">
             <MapPin className="h-5 w-5" />
-            <DialogTitle className="text-primary-foreground">Report Location</DialogTitle>
+            <DialogTitle className="text-primary-foreground">{t("reportLocation")}</DialogTitle>
           </div>
         </DialogHeader>
         
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Street Address *</label>
+            <label className="text-sm font-medium">{t("streetAddress")} *</label>
             <div className="relative" ref={inputRef}>
               <div className="flex gap-2">
                 <Input
-                  placeholder="e.g., Kalverstraat 123, Amsterdam"
+                  placeholder={t("enterStreetAddress")}
                   value={locationAddress}
                   onChange={(e) => setLocationAddress(e.target.value)}
                   onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
@@ -283,61 +290,61 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
                 </div>
               )}
             </div>
-            <p className="text-xs text-muted-foreground">Enter the exact street name and number</p>
+            <p className="text-xs text-muted-foreground">{t("enterExactStreetName")}</p>
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Report Type *</label>
+            <label className="text-sm font-medium">{t("reportType")} *</label>
             <Select value={reportType} onValueChange={setReportType}>
               <SelectTrigger>
-                <SelectValue placeholder="Select type" />
+                <SelectValue placeholder={t("selectType")} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="Poor Lighting">Poor Lighting</SelectItem>
-                <SelectItem value="Harassment">Harassment</SelectItem>
-                <SelectItem value="Theft">Theft</SelectItem>
-                <SelectItem value="Suspicious Activity">Suspicious Activity</SelectItem>
-                <SelectItem value="Traffic Risk">Traffic Risk</SelectItem>
-                <SelectItem value="Disturbance">Disturbance</SelectItem>
-                <SelectItem value="Unsafe Area">Unsafe Area</SelectItem>
-                <SelectItem value="Other">Other</SelectItem>
+                <SelectItem value="Poor Lighting">{t("poorLighting")}</SelectItem>
+                <SelectItem value="Harassment">{t("harassment")}</SelectItem>
+                <SelectItem value="Theft">{t("theft")}</SelectItem>
+                <SelectItem value="Suspicious Activity">{t("suspiciousActivity")}</SelectItem>
+                <SelectItem value="Traffic Risk">{t("trafficRisk")}</SelectItem>
+                <SelectItem value="Disturbance">{t("disturbance")}</SelectItem>
+                <SelectItem value="Unsafe Area">{t("unsafeArea")}</SelectItem>
+                <SelectItem value="Other">{t("other")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Severity</label>
+            <label className="text-sm font-medium">{t("severity")}</label>
             <Select value={severity} onValueChange={setSeverity}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="low">Low</SelectItem>
-                <SelectItem value="medium">Medium</SelectItem>
-                <SelectItem value="high">High</SelectItem>
+                <SelectItem value="low">{t("lowRisk")}</SelectItem>
+                <SelectItem value="medium">{t("mediumRisk")}</SelectItem>
+                <SelectItem value="high">{t("highRisk")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Time of Day</label>
+            <label className="text-sm font-medium">{t("timeOfDay")}</label>
             <Select value={timeOfDay} onValueChange={setTimeOfDay}>
               <SelectTrigger>
-                <SelectValue placeholder="Select time" />
+                <SelectValue placeholder={t("selectTime")} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="Morning">Morning (6am-12pm)</SelectItem>
-                <SelectItem value="Afternoon">Afternoon (12pm-6pm)</SelectItem>
-                <SelectItem value="Evening">Evening (6pm-10pm)</SelectItem>
-                <SelectItem value="Night">Night (10pm-6am)</SelectItem>
+                <SelectItem value="Morning">{t("morning")}</SelectItem>
+                <SelectItem value="Afternoon">{t("afternoon")}</SelectItem>
+                <SelectItem value="Evening">{t("evening")}</SelectItem>
+                <SelectItem value="Night">{t("night")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Description (Optional)</label>
+            <label className="text-sm font-medium">{t("descriptionOptional")}</label>
             <Textarea
-              placeholder="Share details to help others stay safe..."
+              placeholder={t("shareDetails")}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={3}
@@ -346,10 +353,10 @@ const ReportLocationDialog = ({ open, onOpenChange, onReportSubmitted }: ReportL
 
           <div className="flex gap-3">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} className="flex-1">
-              Cancel
+              {t("cancel")}
             </Button>
             <Button type="submit" disabled={isSubmitting} className="flex-1 gradient-primary">
-              {isSubmitting ? "Submitting..." : "Submit Report"}
+              {isSubmitting ? t("submitting") : t("submitReport")}
             </Button>
           </div>
         </form>
